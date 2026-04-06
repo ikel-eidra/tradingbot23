@@ -4,11 +4,14 @@ Uses Binance historical kline (candlestick) data to simulate the strategy
 over a configurable date range.
 """
 
+import datetime as dt
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+import requests
 from binance.client import Client as BinanceClient
+from binance.exceptions import BinanceAPIException
 
 from bot import config
 
@@ -105,7 +108,7 @@ class Backtester:
                 start_ms,
                 end_ms,
             )
-        except Exception as e:
+        except (BinanceAPIException, requests.RequestException) as e:
             logger.warning("Failed to fetch klines for %s: %s", pair, e)
             return []
 
@@ -269,14 +272,14 @@ class Backtester:
 
         return trades, cash
 
-    def _get_candle_for_date(self, candles: list[dict], day) -> dict | None:
+    def _get_candle_for_date(self, candles: list[dict], day: dt.date) -> dict | None:
         """Find candle matching a specific date."""
         for c in candles:
             if c["date"].date() == day:
                 return c
         return None
 
-    def _get_prev_candle(self, candles: list[dict], day) -> dict | None:
+    def _get_prev_candle(self, candles: list[dict], day: dt.date) -> dict | None:
         """Find the candle before a specific date."""
         prev = None
         for c in candles:
@@ -285,7 +288,7 @@ class Backtester:
             prev = c
         return prev
 
-    def _get_price_for_date(self, candles: list[dict], day, fallback: float) -> float:
+    def _get_price_for_date(self, candles: list[dict], day: dt.date, fallback: float) -> float:
         """Get closing price for a date, with fallback."""
         candle = self._get_candle_for_date(candles, day)
         return candle["close"] if candle else fallback

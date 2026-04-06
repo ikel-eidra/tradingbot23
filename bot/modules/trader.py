@@ -66,14 +66,21 @@ class Trader:
     def client(self) -> BinanceClient:
         """Lazy-initialize Binance client."""
         if self._client is None:
+            testnet = config.BINANCE_TESTNET
             if self.paper_mode:
                 logger.info("Running in PAPER mode — no real orders will be placed")
-                self._client = BinanceClient(self.api_key, self.api_secret)
+                self._client = BinanceClient(
+                    self.api_key, self.api_secret, testnet=testnet,
+                )
             else:
-                self._client = BinanceClient(self.api_key, self.api_secret)
-                # Verify connectivity
+                self._client = BinanceClient(
+                    self.api_key, self.api_secret, testnet=testnet,
+                )
                 self._client.ping()
-                logger.info("Connected to Binance API (LIVE mode)")
+                logger.info(
+                    "Connected to Binance API (LIVE mode%s)",
+                    " — TESTNET" if testnet else "",
+                )
         return self._client
 
     def _get_trading_pair(self, symbol: str) -> str:
@@ -198,7 +205,7 @@ class Trader:
             self.positions.append(position)
             return position
 
-        # Live mode: place market buy
+        # Live mode: place market buy, then OCO sell (TP + SL)
         try:
             buy_order = self.client.order_market_buy(
                 symbol=pair,
@@ -210,18 +217,35 @@ class Trader:
             # Recalculate TP/SL based on actual fill price
             tp_price = self._round_price(pair, filled_price * (1 + config.TP_PCT))
             sl_price = self._round_price(pair, filled_price * (1 - config.SL_PCT))
+            # SL limit price slightly below stop price to ensure fill
+            sl_limit_price = self._round_price(pair, sl_price * 0.998)
 
             logger.info(
                 "[LIVE] BUY %s %.6f @ $%.4f (order %s) | TP $%.4f | SL $%.4f",
                 symbol, filled_qty, filled_price, buy_order["orderId"], tp_price, sl_price,
             )
 
-            # Place TP limit sell
-            tp_order = self.client.order_limit_sell(
+            # Place OCO order: TP (limit sell) + SL (stop-limit sell) in one call.
+            # This ensures both TP and SL are on the exchange — if one fills,
+            # Binance automatically cancels the other.
+            oco_order = self.client.create_oco_order(
                 symbol=pair,
+                side="SELL",
                 quantity=filled_qty,
-                price=str(tp_price),
+                price=str(tp_price),           # Limit sell (TP)
+                stopPrice=str(sl_price),       # Stop trigger (SL)
+                stopLimitPrice=str(sl_limit_price),  # Limit price after stop triggers
+                stopLimitTimeInForce="GTC",
             )
+
+            # Extract order IDs from OCO response
+            tp_order_id = None
+            sl_order_id = None
+            for order_report in oco_order.get("orderReports", []):
+                if order_report.get("type") == "LIMIT_MAKER":
+                    tp_order_id = str(order_report["orderId"])
+                elif order_report.get("type") == "STOP_LOSS_LIMIT":
+                    sl_order_id = str(order_report["orderId"])
 
             position = Position(
                 symbol=symbol,
@@ -231,7 +255,8 @@ class Trader:
                 tp_price=tp_price,
                 sl_price=sl_price,
                 buy_order_id=str(buy_order["orderId"]),
-                tp_order_id=str(tp_order["orderId"]),
+                tp_order_id=tp_order_id,
+                sl_order_id=sl_order_id,
             )
             self.positions.append(position)
             return position
@@ -296,11 +321,12 @@ class Trader:
         else:
             # Cancel any open TP/SL orders and market sell
             pair = self._get_trading_pair(pos.symbol)
-            try:
-                if pos.tp_order_id and pos.tp_order_id != "PAPER":
-                    self.client.cancel_order(symbol=pair, orderId=int(pos.tp_order_id))
-            except BinanceAPIException:
-                pass  # Order may already be filled/cancelled
+            for order_id in (pos.tp_order_id, pos.sl_order_id):
+                if order_id and order_id != "PAPER":
+                    try:
+                        self.client.cancel_order(symbol=pair, orderId=int(order_id))
+                    except BinanceAPIException:
+                        pass  # Order may already be filled/cancelled
 
             try:
                 self.client.order_market_sell(symbol=pair, quantity=pos.quantity)

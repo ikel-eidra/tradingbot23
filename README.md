@@ -1,147 +1,272 @@
-# TradingBot23 - Top 10 Losers Spot Trading Bot
+# TradingBot23
 
-A Binance spot trading bot that implements the **"Top 10 Losers"** mean-reversion strategy on the top 50 cryptocurrencies by market capitalization.
+Automated Binance spot trading bot implementing a mean-reversion strategy on the top 50 cryptocurrencies by market capitalization.
 
-## Strategy Overview
+---
 
-The core idea: **coins that are the biggest losers on the 1st of the month (within the top 50 by market cap) tend to bounce back within days due to mean reversion.** We capture these bounces with a disciplined +2% take-profit, tight stop-loss, and maximum hold period.
+## Table of Contents
 
-### Algorithm Rules
+- [Overview](#overview)
+- [Strategy](#strategy)
+- [Architecture](#architecture)
+- [Getting Started](#getting-started)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Backtesting](#backtesting)
+- [Risk Management](#risk-management)
+- [Testing](#testing)
+- [Deployment](#deployment)
+- [Disclaimer](#disclaimer)
+- [License](#license)
 
-1. **Monthly Snapshot**: On the 1st of each month, fetch the top 50 coins by market cap from CoinMarketCap and identify the **top 10 biggest losers** (most negative 24h % change).
-2. **Fixed Basket**: This list of 10 coins is locked for the entire month — no changes until the next snapshot.
-3. **Daily Dip Detection**: Every day (or on a configurable interval), check if any coin in the basket has dipped **≥ 2%** from the previous close.
-4. **Entry**: When a dip is detected, place a spot **market buy** order.
-5. **Exit**:
-   - **Take Profit (TP)**: +2% from entry price (limit sell)
-   - **Stop Loss (SL)**: -1.5% from entry price (stop-limit sell)
-   - **Max Hold**: 3 days — if neither TP nor SL is hit, close the position at market price.
-6. **Position Sizing**: 20% of **current portfolio value** per coin (dynamic/compounding — recalculated based on cash + open positions at each trade entry). As you win, positions grow automatically.
-7. **Filters**:
-   - Coin must be in the top 50 by market cap
-   - 24h trading volume > $50M (liquidity check)
-   - Excludes stablecoins (USDT, USDC, DAI, BUSD, etc.)
+---
 
-### 1-Year Backtest Results (April 2025 – March 2026)
+## Overview
 
-| Metric | Value |
-|---|---|
-| Total 2% TP Hits | 780+ trades |
-| Average Win Rate | 73–81% |
-| Average Hits/Coin/Month | 6–8 |
-| Estimated Cumulative PNL | +248% to +315% |
-| Best Months | May–Aug 2025 (bullish recovery) |
-| Toughest Months | Oct 2025–Mar 2026 (consolidation) |
+TradingBot23 identifies the **top 10 biggest daily losers** among the top 50 coins by market cap at the start of each month. It then monitors these coins for mean-reversion opportunities — buying on dips and exiting at a fixed +2% take-profit target, with a -1.5% stop-loss and 3-day maximum holding period.
 
-## Project Structure
+The bot connects to **Binance** for order execution and **CoinMarketCap** for market data. It supports paper trading, live trading, and historical backtesting.
+
+## Strategy
+
+### Core Thesis
+
+Large-cap cryptocurrencies that experience short-term sell-offs tend to revert toward their mean within 1–3 days. By systematically buying these dips and taking quick profits, the strategy captures small, high-probability gains that compound over time.
+
+### Rules
+
+| Parameter | Value | Description |
+|---|---|---|
+| Universe | Top 50 by market cap | Scanned via CoinMarketCap on snapshot day |
+| Basket Size | 10 coins | Most negative 24h % change, locked for the month |
+| Entry Signal | 24h change ≤ -2% | Checked hourly (configurable) |
+| Take Profit | +2% from entry | Limit sell, placed as OCO order on Binance |
+| Stop Loss | -1.5% from entry | Stop-limit sell, placed as OCO order on Binance |
+| Max Hold | 3 days | Auto-close at market price if neither TP nor SL fills |
+| Position Size | 20% of portfolio | Dynamic — recalculated from current portfolio value |
+| Filters | Volume > $50M, no stablecoins | Ensures liquidity and excludes pegged assets |
+
+### Execution Flow
+
+```
+1st of month ──► Fetch top 50 by market cap
+                  │
+                  ▼
+              Rank by 24h % change (ascending)
+                  │
+                  ▼
+              Select top 10 losers ──► Lock basket for 30 days
+                  │
+                  ▼
+              Hourly cycle:
+                ├── Check open positions (TP / SL / expiry)
+                ├── Scan basket for -2% dips
+                └── Open new positions on detected dips
+```
+
+### Position Sizing (Compounding)
+
+Trade amounts are calculated as a percentage of the **current portfolio value** (cash + open position market value), not the initial deposit. This means:
+
+- Winning streaks automatically increase position sizes.
+- Losing streaks automatically reduce exposure.
+- Capital efficiency improves as the portfolio grows.
+
+## Architecture
 
 ```
 tradingbot23/
 ├── bot/
 │   ├── __init__.py
-│   ├── main.py              # Main entry point & CLI
-│   ├── config.py             # Configuration & environment variables
+│   ├── main.py                  # CLI entry point
+│   ├── config.py                # Environment-driven configuration
 │   └── modules/
 │       ├── __init__.py
-│       ├── data_fetcher.py   # CoinMarketCap API integration
-│       ├── trader.py         # Binance spot trading (buy/sell/TP/SL)
-│       ├── strategy.py       # Strategy engine (snapshot, dip detection, signals)
-│       └── backtester.py     # Historical backtesting engine
+│       ├── data_fetcher.py      # CoinMarketCap API client
+│       ├── trader.py            # Binance order execution & position management
+│       ├── strategy.py          # Monthly snapshot, dip detection, signal dispatch
+│       └── backtester.py        # Historical simulation engine
 ├── tests/
-│   ├── __init__.py
-│   ├── test_data_fetcher.py
-│   ├── test_strategy.py
-│   └── test_trader.py
-├── data/                     # Local data cache (snapshots, trade logs)
-├── logs/                     # Bot logs
-├── .env.example              # Environment variable template
+│   ├── test_data_fetcher.py     # 4 tests — ranking, filtering, volume, limits
+│   ├── test_strategy.py         # 5 tests — basket lifecycle, dip detection
+│   └── test_trader.py           # 8 tests — paper trading, TP/SL/expiry, compounding
+├── data/                        # Persisted monthly snapshots (JSON)
+├── logs/                        # Daily log files
+├── .env.example                 # Configuration template
 ├── .gitignore
 ├── requirements.txt
 ├── Dockerfile
 └── README.md
 ```
 
-## Quick Start
+### Module Responsibilities
 
-### 1. Clone & Install
+| Module | Responsibility |
+|---|---|
+| `data_fetcher.py` | Fetches top coins from CoinMarketCap, ranks losers, persists snapshots to disk |
+| `trader.py` | Manages Binance connection, places market buy + OCO sell orders, tracks positions, computes portfolio value |
+| `strategy.py` | Orchestrates monthly basket refresh, hourly dip scans, and trade signal execution |
+| `backtester.py` | Fetches Binance historical klines, simulates the strategy day-by-day, produces trade logs and equity curves |
+| `config.py` | Loads all parameters from environment variables with defaults |
+| `main.py` | Parses CLI arguments, initializes modules, runs the main trading loop |
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.10+
+- A [Binance](https://www.binance.com/) account with API access enabled
+- A [CoinMarketCap](https://coinmarketcap.com/api/) API key (free tier is sufficient)
+
+### Installation
 
 ```bash
 git clone https://github.com/ikel-eidra/tradingbot23.git
 cd tradingbot23
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+source venv/bin/activate    # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Configure
-
-Copy `.env.example` to `.env` and fill in your API keys:
+### API Key Setup
 
 ```bash
 cp .env.example .env
 ```
 
-Required keys:
-- **Binance API Key & Secret** — for executing trades ([Create API Key](https://www.binance.com/en/my/settings/api-management))
-- **CoinMarketCap API Key** — for fetching market data ([Get Free Key](https://coinmarketcap.com/api/))
+Edit `.env` and add your keys:
 
-### 3. Run the Bot
-
-```bash
-# Live trading mode
-python -m bot.main --mode live
-
-# Paper trading mode (no real orders)
-python -m bot.main --mode paper
-
-# Backtest mode (historical simulation)
-python -m bot.main --mode backtest --start 2025-04-01 --end 2026-03-31
-
-# Force a new monthly snapshot
-python -m bot.main --mode live --force-snapshot
+```
+BINANCE_API_KEY=your_key_here
+BINANCE_API_SECRET=your_secret_here
+CMC_API_KEY=your_coinmarketcap_key_here
 ```
 
-### 4. Run with Docker
+> **Security**: The `.env` file is gitignored. Never commit API keys to version control.
+
+## Configuration
+
+All parameters are configurable via environment variables. Defaults are production-ready for the base strategy.
+
+| Variable | Default | Description |
+|---|---|---|
+| `BINANCE_API_KEY` | — | Binance API key (required for live/paper) |
+| `BINANCE_API_SECRET` | — | Binance API secret (required for live/paper) |
+| `CMC_API_KEY` | — | CoinMarketCap API key (required) |
+| `TRADING_MODE` | `paper` | `paper`, `live`, or `backtest` |
+| `CAPITAL_USD` | `10000` | Initial trading capital (USD) |
+| `PER_TRADE_PCT` | `0.20` | Position size as fraction of current portfolio value |
+| `TP_PCT` | `0.02` | Take profit threshold (2%) |
+| `SL_PCT` | `0.015` | Stop loss threshold (1.5%) |
+| `MAX_HOLD_DAYS` | `3` | Force-close positions after N days |
+| `DIP_THRESHOLD_PCT` | `0.02` | Minimum 24h decline to trigger entry (2%) |
+| `TOP_N_COINS` | `50` | Market cap universe size |
+| `TOP_N_LOSERS` | `10` | Number of losers in monthly basket |
+| `MIN_VOLUME_USD` | `50000000` | Minimum 24h volume ($50M) |
+| `CHECK_INTERVAL_HOURS` | `1` | Dip scan frequency |
+| `SNAPSHOT_DAY` | `1` | Day of month for basket refresh |
+| `BINANCE_TESTNET` | `false` | Use Binance testnet for development |
+| `LOG_LEVEL` | `INFO` | Logging verbosity |
+
+## Usage
+
+### Paper Trading (default — no real money)
+
+```bash
+python -m bot.main --mode paper
+```
+
+### Live Trading
+
+```bash
+python -m bot.main --mode live
+```
+
+### Force a Fresh Monthly Snapshot
+
+```bash
+python -m bot.main --mode paper --force-snapshot
+```
+
+## Backtesting
+
+Run a historical simulation using Binance kline data:
+
+```bash
+python -m bot.main --mode backtest --start 2025-04-01 --end 2026-03-31
+```
+
+Output:
+- Summary printed to console (trades, win rate, PNL, drawdown)
+- Detailed results saved to `data/backtest_<start>_<end>.txt`
+- Trade-by-trade CSV saved to `data/backtest_trades_<start>_<end>.csv`
+
+For accurate backtests, provide historical monthly snapshots via the `basket_override` parameter in `Backtester.run()`. Without overrides, the backtester uses a default basket of well-known large-cap coins.
+
+## Risk Management
+
+| Control | Implementation |
+|---|---|
+| Paper mode by default | No real orders until `--mode live` is explicitly set |
+| OCO orders | TP and SL are placed together on Binance — if one fills, the other is automatically cancelled |
+| One position per coin | Duplicate entries are blocked at the trader level |
+| Cash safety check | Trade size is capped at available cash balance |
+| Dynamic position sizing | Losses reduce exposure automatically (compounding works both ways) |
+| Max hold enforcement | Stale positions are closed after the configured holding period |
+| Stablecoin exclusion | USDT, USDC, DAI, BUSD, TUSD, FDUSD, USDP, PYUSD are filtered out |
+| Volume filter | Coins below $50M 24h volume are excluded |
+| Testnet support | Set `BINANCE_TESTNET=true` for development against the Binance testnet |
+| Logging | All trades, signals, errors, and portfolio snapshots are logged to `logs/` |
+
+## Testing
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The test suite covers:
+- Data fetcher: loser ranking, volume filtering, count limits, positive-change exclusion
+- Strategy: basket refresh logic, dip detection with price data, empty basket handling
+- Trader: paper buy/sell, TP/SL/expiry triggers, duplicate position blocking, compounding
+
+## Deployment
+
+### Docker
 
 ```bash
 docker build -t tradingbot23 .
 docker run --env-file .env tradingbot23
 ```
 
-## Configuration
+### Systemd (Linux)
 
-All settings can be configured via environment variables (`.env`) or `bot/config.py`:
+Create `/etc/systemd/system/tradingbot23.service`:
 
-| Variable | Default | Description |
-|---|---|---|
-| `BINANCE_API_KEY` | — | Your Binance API key |
-| `BINANCE_API_SECRET` | — | Your Binance API secret |
-| `CMC_API_KEY` | — | CoinMarketCap API key |
-| `TRADING_MODE` | `paper` | `live`, `paper`, or `backtest` |
-| `CAPITAL_USD` | `10000` | Total trading capital in USD |
-| `PER_TRADE_PCT` | `0.20` | Fraction of current portfolio per trade (20%, compounding) |
-| `TP_PCT` | `0.02` | Take profit percentage (2%) |
-| `SL_PCT` | `0.015` | Stop loss percentage (1.5%) |
-| `MAX_HOLD_DAYS` | `3` | Max days to hold a position |
-| `DIP_THRESHOLD_PCT` | `0.02` | Minimum dip to trigger entry (2%) |
-| `TOP_N_COINS` | `50` | Top N coins by market cap to scan |
-| `TOP_N_LOSERS` | `10` | Number of losers to include in basket |
-| `MIN_VOLUME_USD` | `50000000` | Minimum 24h volume filter ($50M) |
-| `CHECK_INTERVAL_HOURS` | `1` | How often to check for dips |
-| `SNAPSHOT_DAY` | `1` | Day of month to take snapshot |
+```ini
+[Unit]
+Description=TradingBot23
+After=network.target
 
-## Safety & Risk Management
+[Service]
+Type=simple
+WorkingDirectory=/opt/tradingbot23
+ExecStart=/opt/tradingbot23/venv/bin/python -m bot.main --mode live
+EnvironmentFile=/opt/tradingbot23/.env
+Restart=on-failure
+RestartSec=30
 
-- **Paper mode by default** — won't place real orders until you explicitly switch to `live`
-- **Position limits** — max 10% of capital per trade, max 1 open position per coin
-- **Stablecoin exclusion** — automatically filters out USDT, USDC, DAI, BUSD, TUSD, FDUSD
-- **Volume filter** — skips illiquid coins
-- **Max hold enforcement** — auto-closes stale positions after 3 days
-- **Logging** — all trades, signals, and errors logged to `logs/`
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable tradingbot23
+sudo systemctl start tradingbot23
+```
 
 ## Disclaimer
 
-This bot is for **educational and research purposes**. Cryptocurrency trading involves significant risk. Past backtest performance does not guarantee future results. Use at your own risk. Never trade with money you cannot afford to lose.
+This software is provided for **educational and research purposes only**. Cryptocurrency trading carries substantial financial risk. Past performance — whether from backtests or live results — does not guarantee future returns. The authors accept no liability for financial losses incurred through use of this software. Trade at your own risk and never allocate capital you cannot afford to lose.
 
 ## License
 

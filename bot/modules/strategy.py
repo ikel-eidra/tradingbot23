@@ -4,10 +4,8 @@ Orchestrates the monthly snapshot, daily dip detection, and trade
 signal generation.
 """
 
-import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 
 from bot import config
 from bot.modules.data_fetcher import DataFetcher
@@ -78,6 +76,8 @@ class Strategy:
         """Check current prices of basket coins and detect dips.
 
         A dip is when the 24h change is <= -DIP_THRESHOLD_PCT.
+        CMC data is fetched once per cycle (not per coin) to avoid
+        excessive API calls and rate limiting.
 
         Returns:
             List of coin dicts that are currently dipping.
@@ -86,32 +86,36 @@ class Strategy:
             logger.warning("No basket set — cannot detect dips")
             return []
 
+        # Fetch fresh market data once for all coins (not inside the loop)
+        try:
+            fresh_coins = self.fetcher.get_top_coins()
+        except Exception:
+            logger.exception("Failed to fetch fresh market data for dip detection")
+            return []
+        fresh_data = {c["symbol"]: c for c in fresh_coins}
+
+        # DIP_THRESHOLD_PCT is stored as decimal (0.02 = 2%).
+        # CMC returns percent_change_24h as percentage (-3.5 means -3.5%).
+        threshold = -(config.DIP_THRESHOLD_PCT * 100)
+
+        basket_symbols = {c["symbol"] for c in self.basket}
         dipping = []
         for coin in self.basket:
             symbol = coin["symbol"]
-            current_price = self.trader.get_current_price(symbol)
-            if current_price is None:
+            if symbol not in fresh_data:
+                logger.debug("No fresh data for %s, skipping", symbol)
                 continue
 
-            # Calculate change from snapshot price
-            snapshot_price = coin.get("price", 0)
-            if snapshot_price <= 0:
-                continue
+            change_24h = fresh_data[symbol]["percent_change_24h"]
+            current_price = fresh_data[symbol]["price"]
 
-            # We also check CMC 24h change for fresh dip detection
-            # For live trading, re-fetch from CMC for accurate 24h change
-            fresh_coins = self.fetcher.get_top_coins()
-            fresh_data = {c["symbol"]: c for c in fresh_coins}
-
-            if symbol in fresh_data:
-                change_24h = fresh_data[symbol]["percent_change_24h"]
-                if change_24h <= -(config.DIP_THRESHOLD_PCT * 100):
-                    coin_with_price = {**coin, "current_price": current_price, "change_24h": change_24h}
-                    dipping.append(coin_with_price)
-                    logger.info(
-                        "DIP detected: %s at $%.4f (24h: %+.2f%%)",
-                        symbol, current_price, change_24h,
-                    )
+            if change_24h <= threshold:
+                coin_with_price = {**coin, "current_price": current_price, "change_24h": change_24h}
+                dipping.append(coin_with_price)
+                logger.info(
+                    "DIP detected: %s at $%.4f (24h: %+.2f%%)",
+                    symbol, current_price, change_24h,
+                )
 
         return dipping
 
