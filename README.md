@@ -221,6 +221,26 @@ Output:
 
 For accurate backtests, provide historical monthly snapshots via the `basket_override` parameter in `Backtester.run()`. Without overrides, the backtester uses a default basket of well-known large-cap coins.
 
+## Engines: Spot vs Futures
+
+TradingBot23 supports two engines, selectable via `ENGINE=spot|futures` or `--engine`:
+
+| | **Spot** (default) | **Futures** (paper-only) |
+|---|---|---|
+| Execution | Live or paper on Binance spot | Paper-only, live USDT-M perp prices |
+| Leverage | 1x | 2x default, hard cap 5x |
+| Signal | 24h dip (CMC) | True 5-minute kline change |
+| Fees | 0.1% per side | 0.06% per side on **notional** |
+| Funding | n/a | ~0.03%/day drag modeled |
+| Liquidation | n/a | Tracked + safety check refuses trades where SL breaches liq |
+| Net targets | 1% TP / 1.5% SL on capital | 0.5% TP / 0.75% SL on margin |
+
+```bash
+python -m bot.main --mode paper --engine futures
+```
+
+> Futures mode is **paper-only by design**. Live perp execution requires margin/risk controls that are intentionally not implemented here.
+
 ## Risk Management
 
 | Control | Implementation |

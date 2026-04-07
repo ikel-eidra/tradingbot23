@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from bot import config
 from bot.modules.data_fetcher import DataFetcher
+from bot.modules.futures_trader import FuturesTrader
 from bot.modules.trader import Trader
 
 logger = logging.getLogger(__name__)
@@ -17,9 +18,14 @@ logger = logging.getLogger(__name__)
 class Strategy:
     """Top 10 Losers mean-reversion strategy engine."""
 
-    def __init__(self, fetcher: DataFetcher | None = None, trader: Trader | None = None):
+    def __init__(
+        self,
+        fetcher: DataFetcher | None = None,
+        trader: Trader | FuturesTrader | None = None,
+    ):
         self.fetcher = fetcher or DataFetcher()
         self.trader = trader or Trader()
+        self.is_futures = isinstance(self.trader, FuturesTrader)
         self.basket: list[dict] = []  # Current month's fixed coin basket
         self.basket_month: int | None = None  # Month the basket was set
         self.basket_year: int | None = None
@@ -86,6 +92,9 @@ class Strategy:
             logger.warning("No basket set — cannot detect dips")
             return []
 
+        if self.is_futures:
+            return self._detect_dips_futures()
+
         # Fetch fresh market data once for all coins (not inside the loop)
         try:
             fresh_coins = self.fetcher.get_top_coins()
@@ -117,6 +126,26 @@ class Strategy:
                     symbol, current_price, change_24h,
                 )
 
+        return dipping
+
+    def _detect_dips_futures(self) -> list[dict]:
+        """Detect dips for futures using true 5-minute kline change."""
+        threshold = -(config.FUTURES_DIP_THRESHOLD_PCT * 100)
+        dipping = []
+        for coin in self.basket:
+            symbol = coin["symbol"]
+            change_5m = self.trader.get_5m_change(symbol)
+            if change_5m is None:
+                continue
+            if change_5m <= threshold:
+                price = self.trader.get_current_price(symbol)
+                if price is None:
+                    continue
+                dipping.append({**coin, "current_price": price, "change_5m": change_5m})
+                logger.info(
+                    "5m DIP detected: %s at $%.4f (5m: %+.3f%%)",
+                    symbol, price, change_5m,
+                )
         return dipping
 
     def detect_dips_from_prices(self, price_data: dict[str, dict]) -> list[dict]:

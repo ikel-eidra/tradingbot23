@@ -61,6 +61,25 @@ SNAPSHOT_DAY = int(os.getenv("SNAPSHOT_DAY", "1"))  # Day of month
 # --- Bot Operation ---
 CHECK_INTERVAL_HOURS = float(os.getenv("CHECK_INTERVAL_HOURS", "1"))
 
+# --- Engine selection ---
+# "spot"    = Binance spot trading (default, no leverage)
+# "futures" = Binance USDT-M Perpetual Futures (paper-only initially)
+ENGINE = os.getenv("ENGINE", "spot")
+
+# --- Futures settings (only used when ENGINE=futures) ---
+LEVERAGE = int(os.getenv("LEVERAGE", "2"))  # 2x default — conservative
+MAX_LEVERAGE = 5  # Hard cap for safety
+FUTURES_FEE_PCT = float(os.getenv("FUTURES_FEE_PCT", "0.0006"))  # 0.06% taker (Binance USDT-M)
+# Average daily funding cost as % of notional. Binance posts every 8h.
+# Historical average is ~0.01% per 8h = 0.03% per day. Conservative default.
+FUNDING_RATE_DAILY = float(os.getenv("FUNDING_RATE_DAILY", "0.0003"))
+# Net targets when running futures — usually smaller because leverage amplifies them.
+# At 2x leverage, a 0.5% net price move = ~1% net PNL on margin.
+FUTURES_NET_TP_PCT = float(os.getenv("FUTURES_NET_TP_PCT", "0.005"))  # 0.5% net on margin
+FUTURES_NET_SL_PCT = float(os.getenv("FUTURES_NET_SL_PCT", "0.0075"))  # 0.75% net on margin
+# 5-minute dip threshold for futures (smaller than spot's 24h threshold)
+FUTURES_DIP_THRESHOLD_PCT = float(os.getenv("FUTURES_DIP_THRESHOLD_PCT", "0.005"))  # -0.5% in 5m
+
 # --- Stablecoins to exclude ---
 STABLECOIN_SYMBOLS = {"USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDP", "PYUSD"}
 

@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from bot import config
 from bot.modules.backtester import Backtester
 from bot.modules.data_fetcher import DataFetcher
+from bot.modules.futures_trader import FuturesTrader
 from bot.modules.strategy import Strategy
 from bot.modules.trader import Trader
 
@@ -69,7 +70,12 @@ def run_trading(force_snapshot: bool = False):
     logger.info("Position size: %.0f%% of portfolio (compounding)", config.PER_TRADE_PCT * 100)
 
     fetcher = DataFetcher()
-    trader = Trader()
+    if config.ENGINE == "futures":
+        logger.info("Engine: FUTURES (paper-only, %dx leverage)", config.LEVERAGE)
+        trader = FuturesTrader()
+    else:
+        logger.info("Engine: SPOT")
+        trader = Trader()
     strategy = Strategy(fetcher=fetcher, trader=trader)
 
     if force_snapshot:
@@ -159,6 +165,10 @@ def main():
         help="Backtest end date YYYY-MM-DD (default: 2026-03-31)",
     )
     parser.add_argument(
+        "--engine", choices=["spot", "futures"], default=None,
+        help="Trading engine: spot (default) or futures (paper-only)",
+    )
+    parser.add_argument(
         "--force-snapshot", action="store_true",
         help="Force a new monthly snapshot regardless of date",
     )
@@ -167,6 +177,8 @@ def main():
 
     # Override config trading mode from CLI
     config.TRADING_MODE = args.mode
+    if args.engine:
+        config.ENGINE = args.engine
 
     if args.mode == "backtest":
         run_backtest(args.start, args.end)
