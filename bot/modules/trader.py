@@ -186,12 +186,14 @@ class Trader:
         sl_price = self._round_price(pair, current_price * (1 - config.SL_PCT))
 
         if self.paper_mode:
-            # Paper mode: simulate the buy, deduct from cash
-            cost = quantity * current_price
-            self.cash_balance -= cost
+            # Paper mode: simulate the buy, deduct cost + Binance fee from cash
+            gross_cost = quantity * current_price
+            fee = gross_cost * config.FEE_PCT
+            total_cost = gross_cost + fee
+            self.cash_balance -= total_cost
             logger.info(
-                "[PAPER] BUY %s %.6f @ $%.4f ($%.2f) | TP $%.4f | SL $%.4f | Cash: $%.2f",
-                symbol, quantity, current_price, cost, tp_price, sl_price, self.cash_balance,
+                "[PAPER] BUY %s %.6f @ $%.4f (cost $%.2f + fee $%.2f) | TP $%.4f | SL $%.4f | Cash: $%.2f",
+                symbol, quantity, current_price, gross_cost, fee, tp_price, sl_price, self.cash_balance,
             )
             position = Position(
                 symbol=symbol,
@@ -304,19 +306,27 @@ class Trader:
         return closed
 
     def _close_position(self, pos: Position, exit_price: float, reason: PositionStatus):
-        """Close a position."""
+        """Close a position. PNL is computed NET of round-trip Binance fees."""
         pos.status = reason
         pos.exit_price = exit_price
         pos.exit_time = datetime.now(timezone.utc)
-        pos.pnl_pct = ((exit_price - pos.entry_price) / pos.entry_price) * 100
+
+        # Net PNL accounts for both buy fee and sell fee.
+        # entry effective cost per unit = entry_price * (1 + FEE_PCT)
+        # exit effective proceeds per unit = exit_price * (1 - FEE_PCT)
+        entry_cost = pos.entry_price * (1 + config.FEE_PCT)
+        exit_proceeds = exit_price * (1 - config.FEE_PCT)
+        pos.pnl_pct = ((exit_proceeds - entry_cost) / entry_cost) * 100
 
         if self.paper_mode:
-            # Return proceeds to cash balance
-            proceeds = pos.quantity * exit_price
-            self.cash_balance += proceeds
+            # Return proceeds (minus sell fee) to cash balance
+            gross_proceeds = pos.quantity * exit_price
+            sell_fee = gross_proceeds * config.FEE_PCT
+            net_proceeds = gross_proceeds - sell_fee
+            self.cash_balance += net_proceeds
             logger.info(
-                "[PAPER] CLOSE %s @ $%.4f | Reason: %s | PNL: %+.2f%% | Cash: $%.2f",
-                pos.symbol, exit_price, reason.value, pos.pnl_pct, self.cash_balance,
+                "[PAPER] CLOSE %s @ $%.4f | Reason: %s | NET PNL: %+.2f%% | Fee: $%.2f | Cash: $%.2f",
+                pos.symbol, exit_price, reason.value, pos.pnl_pct, sell_fee, self.cash_balance,
             )
         else:
             # Cancel any open TP/SL orders and market sell

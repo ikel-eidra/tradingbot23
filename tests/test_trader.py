@@ -15,7 +15,9 @@ class TestTrader(unittest.TestCase):
         config.TRADING_MODE = "paper"
         config.CAPITAL_USD = 10000
         config.PER_TRADE_PCT = 0.20
-        config.TP_PCT = 0.02
+        config.NET_TP_PCT = 0.01
+        config.FEE_PCT = 0.001
+        config.TP_PCT = config.NET_TP_PCT + (2 * config.FEE_PCT)  # 1.2% gross
         config.SL_PCT = 0.015
         config.MAX_HOLD_DAYS = 3
         self.trader = Trader()
@@ -26,14 +28,16 @@ class TestTrader(unittest.TestCase):
         self.assertEqual(self.trader.get_portfolio_value(), 10000)
 
     def test_cash_balance_after_paper_buy(self):
-        """Cash should decrease after a paper buy."""
+        """Cash should decrease by trade amount + Binance fee."""
         with patch.object(self.trader, "get_current_price", return_value=100.0):
             with patch.object(self.trader, "_adjust_quantity", side_effect=lambda p, q: q):
                 with patch.object(self.trader, "_round_price", side_effect=lambda p, pr: pr):
                     pos = self.trader.open_position("TEST", amount_usd=2000)
 
         self.assertIsNotNone(pos)
-        self.assertAlmostEqual(self.trader.cash_balance, 8000, places=2)
+        # $2000 trade + 0.1% fee ($2) = $2002 total deducted
+        expected_cash = 10000 - 2000 - (2000 * config.FEE_PCT)
+        self.assertAlmostEqual(self.trader.cash_balance, expected_cash, places=2)
 
     def test_no_duplicate_positions(self):
         """Should not open duplicate position for same coin."""
@@ -106,6 +110,22 @@ class TestTrader(unittest.TestCase):
 
         # Cash should now be > initial due to profit
         self.assertGreater(self.trader.cash_balance, 10000)
+
+    def test_net_pnl_after_fees(self):
+        """A trade closed at the gross TP should yield approximately the NET TP target."""
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            with patch.object(self.trader, "_adjust_quantity", side_effect=lambda p, q: q):
+                with patch.object(self.trader, "_round_price", side_effect=lambda p, pr: pr):
+                    pos = self.trader.open_position("TEST", amount_usd=1000)
+
+        # Close at gross TP price (1.2% above entry)
+        gross_tp_price = 100.0 * (1 + config.TP_PCT)
+        with patch.object(self.trader, "get_current_price", return_value=gross_tp_price):
+            closed = self.trader.check_positions()
+
+        self.assertEqual(len(closed), 1)
+        # Net PNL should be ~1% (the NET_TP_PCT target), within 0.05% tolerance
+        self.assertAlmostEqual(closed[0].pnl_pct, config.NET_TP_PCT * 100, delta=0.05)
 
     def test_stats_empty(self):
         """Stats should handle no trades."""

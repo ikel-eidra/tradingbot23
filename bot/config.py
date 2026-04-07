@@ -27,7 +27,18 @@ CAPITAL_USD = float(os.getenv("CAPITAL_USD", "10000"))
 PER_TRADE_PCT = float(os.getenv("PER_TRADE_PCT", "0.20"))  # 20% of current balance per coin
 
 # --- Strategy Parameters ---
-TP_PCT = float(os.getenv("TP_PCT", "0.02"))           # +2% take profit
+# NET take profit target (after fees). Default = 1% net profit per trade.
+NET_TP_PCT = float(os.getenv("NET_TP_PCT", "0.01"))
+# Binance spot trading fee per side (0.1% standard, 0.075% with BNB discount).
+FEE_PCT = float(os.getenv("FEE_PCT", "0.001"))
+# Gross TP must cover net target + fees on both sides (buy + sell).
+# Example: NET 1% + 0.1% buy fee + 0.1% sell fee = 1.2% gross TP.
+TP_PCT = NET_TP_PCT + (2 * FEE_PCT)
+# Allow manual override of gross TP via env var if user wants to set it directly.
+_TP_OVERRIDE = os.getenv("TP_PCT")
+if _TP_OVERRIDE is not None:
+    TP_PCT = float(_TP_OVERRIDE)
+
 SL_PCT = float(os.getenv("SL_PCT", "0.015"))          # -1.5% stop loss
 MAX_HOLD_DAYS = int(os.getenv("MAX_HOLD_DAYS", "3"))  # Auto-close after 3 days
 DIP_THRESHOLD_PCT = float(os.getenv("DIP_THRESHOLD_PCT", "0.02"))  # -2% dip to enter

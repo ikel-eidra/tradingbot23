@@ -40,8 +40,9 @@ Large-cap cryptocurrencies that experience short-term sell-offs tend to revert t
 | Universe | Top 50 by market cap | Scanned via CoinMarketCap on snapshot day |
 | Basket Size | 10 coins | Most negative 24h % change, locked for the month |
 | Entry Signal | 24h change ≤ -2% | Checked hourly (configurable) |
-| Take Profit | +2% from entry | Limit sell, placed as OCO order on Binance |
+| Take Profit | +1% NET (1.2% gross) | Net target after Binance fees; gross auto-computed as `NET_TP_PCT + 2 × FEE_PCT` |
 | Stop Loss | -1.5% from entry | Stop-limit sell, placed as OCO order on Binance |
+| Trading Fees | 0.1% per side | Applied to all paper trades and backtests for realistic PNL |
 | Max Hold | 3 days | Auto-close at market price if neither TP nor SL fills |
 | Position Size | 20% of portfolio | Dynamic — recalculated from current portfolio value |
 | Filters | Volume > $50M, no stablecoins | Ensures liquidity and excludes pegged assets |
@@ -156,7 +157,9 @@ All parameters are configurable via environment variables. Defaults are producti
 | `TRADING_MODE` | `paper` | `paper`, `live`, or `backtest` |
 | `CAPITAL_USD` | `10000` | Initial trading capital (USD) |
 | `PER_TRADE_PCT` | `0.20` | Position size as fraction of current portfolio value |
-| `TP_PCT` | `0.02` | Take profit threshold (2%) |
+| `NET_TP_PCT` | `0.01` | Net take profit target after fees (1%) |
+| `FEE_PCT` | `0.001` | Binance fee per side (0.1%; use 0.00075 with BNB discount) |
+| `TP_PCT` | auto | Gross TP — auto-computed as `NET_TP_PCT + 2 × FEE_PCT`. Override only if you want a specific gross value. |
 | `SL_PCT` | `0.015` | Stop loss threshold (1.5%) |
 | `MAX_HOLD_DAYS` | `3` | Force-close positions after N days |
 | `DIP_THRESHOLD_PCT` | `0.02` | Minimum 24h decline to trigger entry (2%) |

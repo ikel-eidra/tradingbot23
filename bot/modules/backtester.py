@@ -174,34 +174,19 @@ class Backtester:
 
                 # Check if high hit TP
                 if candle["high"] >= pos.tp_price:
-                    pos.exit_date = candle["date"]
-                    pos.exit_price = pos.tp_price
-                    pos.exit_reason = "tp"
-                    pos.pnl_pct = config.TP_PCT * 100
-                    pos.pnl_usd = pos.quantity * pos.tp_price - pos.quantity * pos.entry_price
-                    cash += pos.quantity * pos.tp_price
+                    cash += self._close_trade(pos, pos.tp_price, candle["date"], "tp")
                     trades.append(pos)
                     continue
 
                 # Check if low hit SL
                 if candle["low"] <= pos.sl_price:
-                    pos.exit_date = candle["date"]
-                    pos.exit_price = pos.sl_price
-                    pos.exit_reason = "sl"
-                    pos.pnl_pct = -(config.SL_PCT * 100)
-                    pos.pnl_usd = pos.quantity * pos.sl_price - pos.quantity * pos.entry_price
-                    cash += pos.quantity * pos.sl_price
+                    cash += self._close_trade(pos, pos.sl_price, candle["date"], "sl")
                     trades.append(pos)
                     continue
 
                 # Check expiry
                 if days_held >= config.MAX_HOLD_DAYS:
-                    pos.exit_date = candle["date"]
-                    pos.exit_price = candle["close"]
-                    pos.exit_reason = "expired"
-                    pos.pnl_pct = ((candle["close"] - pos.entry_price) / pos.entry_price) * 100
-                    pos.pnl_usd = pos.quantity * candle["close"] - pos.quantity * pos.entry_price
-                    cash += pos.quantity * candle["close"]
+                    cash += self._close_trade(pos, candle["close"], candle["date"], "expired")
                     trades.append(pos)
                     continue
 
@@ -241,7 +226,9 @@ class Backtester:
                         continue
 
                     entry_price = candle["close"]
-                    quantity = trade_amount / entry_price
+                    # Account for buy fee — actual coins received are less.
+                    gross_qty = trade_amount / entry_price
+                    quantity = gross_qty * (1 - config.FEE_PCT)
                     tp_price = entry_price * (1 + config.TP_PCT)
                     sl_price = entry_price * (1 - config.SL_PCT)
 
@@ -262,15 +249,34 @@ class Backtester:
             last_day = all_dates[-1] if all_dates else month_end.date()
             candle = self._get_candle_for_date(candle_data.get(pos.symbol, []), last_day)
             exit_price = candle["close"] if candle else pos.entry_price
-            pos.exit_date = datetime.combine(last_day, datetime.min.time()).replace(tzinfo=timezone.utc)
-            pos.exit_price = exit_price
-            pos.exit_reason = "month_end"
-            pos.pnl_pct = ((exit_price - pos.entry_price) / pos.entry_price) * 100
-            pos.pnl_usd = pos.quantity * exit_price - pos.quantity * pos.entry_price
-            cash += pos.quantity * exit_price
+            exit_date = datetime.combine(last_day, datetime.min.time()).replace(tzinfo=timezone.utc)
+            cash += self._close_trade(pos, exit_price, exit_date, "month_end")
             trades.append(pos)
 
         return trades, cash
+
+    def _close_trade(
+        self,
+        pos: "BacktestTrade",
+        exit_price: float,
+        exit_date: datetime,
+        reason: str,
+    ) -> float:
+        """Close a backtest trade with fee-aware net PNL. Returns sale proceeds."""
+        pos.exit_date = exit_date
+        pos.exit_price = exit_price
+        pos.exit_reason = reason
+
+        # Net PNL: account for both buy fee (paid on entry) and sell fee (paid on exit).
+        entry_cost = pos.entry_price * (1 + config.FEE_PCT)
+        exit_proceeds_per_unit = exit_price * (1 - config.FEE_PCT)
+        pos.pnl_pct = ((exit_proceeds_per_unit - entry_cost) / entry_cost) * 100
+        pos.pnl_usd = (exit_proceeds_per_unit - entry_cost) * pos.quantity
+
+        # Cash returned to portfolio is gross proceeds minus sell fee.
+        gross_proceeds = pos.quantity * exit_price
+        sell_fee = gross_proceeds * config.FEE_PCT
+        return gross_proceeds - sell_fee
 
     def _get_candle_for_date(self, candles: list[dict], day: dt.date) -> dict | None:
         """Find candle matching a specific date."""
