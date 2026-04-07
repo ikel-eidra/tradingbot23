@@ -29,17 +29,26 @@ PER_TRADE_PCT = float(os.getenv("PER_TRADE_PCT", "0.20"))  # 20% of current bala
 # --- Strategy Parameters ---
 # NET take profit target (after fees). Default = 1% net profit per trade.
 NET_TP_PCT = float(os.getenv("NET_TP_PCT", "0.01"))
+# NET stop loss (after fees). Default = 1.5% net loss tolerance.
+NET_SL_PCT = float(os.getenv("NET_SL_PCT", "0.015"))
 # Binance spot trading fee per side (0.1% standard, 0.075% with BNB discount).
 FEE_PCT = float(os.getenv("FEE_PCT", "0.001"))
+
 # Gross TP must cover net target + fees on both sides (buy + sell).
 # Example: NET 1% + 0.1% buy fee + 0.1% sell fee = 1.2% gross TP.
 TP_PCT = NET_TP_PCT + (2 * FEE_PCT)
-# Allow manual override of gross TP via env var if user wants to set it directly.
+# Gross SL: net loss tolerance MINUS the fee drag (you lose less in price
+# terms because fees already eat 0.2% on top).
+SL_PCT = max(NET_SL_PCT - (2 * FEE_PCT), 0.001)
+
+# Allow manual override of gross TP/SL via env var if user wants explicit control.
 _TP_OVERRIDE = os.getenv("TP_PCT")
 if _TP_OVERRIDE is not None:
     TP_PCT = float(_TP_OVERRIDE)
+_SL_OVERRIDE = os.getenv("SL_PCT")
+if _SL_OVERRIDE is not None:
+    SL_PCT = float(_SL_OVERRIDE)
 
-SL_PCT = float(os.getenv("SL_PCT", "0.015"))          # -1.5% stop loss
 MAX_HOLD_DAYS = int(os.getenv("MAX_HOLD_DAYS", "3"))  # Auto-close after 3 days
 DIP_THRESHOLD_PCT = float(os.getenv("DIP_THRESHOLD_PCT", "0.02"))  # -2% dip to enter
 
@@ -70,7 +79,10 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 
 def validate():
-    """Validate that required configuration is present."""
+    """Validate config and warn on unfavorable risk/reward setups."""
+    import logging
+    log = logging.getLogger(__name__)
+
     errors = []
     if TRADING_MODE == "live":
         if not BINANCE_API_KEY:
@@ -81,3 +93,42 @@ def validate():
         errors.append("CMC_API_KEY is required to fetch market data")
     if errors:
         raise ValueError("Configuration errors:\n" + "\n".join(f"  - {e}" for e in errors))
+
+    # --- Risk/reward sanity checks ---
+    # Required win rate to break even: SL / (TP + SL)
+    if NET_TP_PCT > 0 and NET_SL_PCT > 0:
+        rr_ratio = NET_SL_PCT / NET_TP_PCT  # risk units per reward unit
+        breakeven_winrate = NET_SL_PCT / (NET_TP_PCT + NET_SL_PCT) * 100
+
+        log.info(
+            "Strategy parameters: NET TP %.3f%% / NET SL %.3f%% / "
+            "Gross TP %.3f%% / Gross SL %.3f%% / Fee %.3f%% per side",
+            NET_TP_PCT * 100, NET_SL_PCT * 100,
+            TP_PCT * 100, SL_PCT * 100, FEE_PCT * 100,
+        )
+        log.info(
+            "Risk:Reward = %.2f:1 | Required win rate to break even: %.1f%%",
+            rr_ratio, breakeven_winrate,
+        )
+
+        if breakeven_winrate >= 90:
+            log.warning(
+                "⚠️  EXTREME RISK: Break-even win rate is %.1f%%. "
+                "This is rarely sustainable in live markets. "
+                "Consider tightening SL or raising NET_TP_PCT.",
+                breakeven_winrate,
+            )
+        elif breakeven_winrate >= 80:
+            log.warning(
+                "⚠️  HIGH RISK: Break-even win rate is %.1f%%. "
+                "Backtest carefully before going live.",
+                breakeven_winrate,
+            )
+
+    # Warn if gross TP is smaller than the spread/fee buffer is realistic for
+    if TP_PCT < 2 * FEE_PCT:
+        log.warning(
+            "⚠️  Gross TP (%.3f%%) is smaller than round-trip fees (%.3f%%). "
+            "Profitable trades are mathematically impossible — adjust NET_TP_PCT.",
+            TP_PCT * 100, 2 * FEE_PCT * 100,
+        )

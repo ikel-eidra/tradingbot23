@@ -157,10 +157,25 @@ All parameters are configurable via environment variables. Defaults are producti
 | `TRADING_MODE` | `paper` | `paper`, `live`, or `backtest` |
 | `CAPITAL_USD` | `10000` | Initial trading capital (USD) |
 | `PER_TRADE_PCT` | `0.20` | Position size as fraction of current portfolio value |
-| `NET_TP_PCT` | `0.01` | Net take profit target after fees (1%) |
+| `NET_TP_PCT` | `0.01` | **Net** take profit target after fees (1%) |
+| `NET_SL_PCT` | `0.015` | **Net** stop loss tolerance after fees (1.5%) |
 | `FEE_PCT` | `0.001` | Binance fee per side (0.1%; use 0.00075 with BNB discount) |
-| `TP_PCT` | auto | Gross TP — auto-computed as `NET_TP_PCT + 2 × FEE_PCT`. Override only if you want a specific gross value. |
-| `SL_PCT` | `0.015` | Stop loss threshold (1.5%) |
+| `TP_PCT` | auto | Gross TP — auto-computed as `NET_TP_PCT + 2 × FEE_PCT`. Override only if you want explicit control. |
+| `SL_PCT` | auto | Gross SL — auto-computed as `NET_SL_PCT − 2 × FEE_PCT`. Override only if you want explicit control. |
+
+### Strategy Presets
+
+Pick the profile that matches your risk appetite. All values are **net of Binance's 0.1%/side fees**.
+
+| Preset | `NET_TP_PCT` | `NET_SL_PCT` | Gross TP | Gross SL | R:R | Break-even Win Rate |
+|---|---:|---:|---:|---:|---:|---:|
+| **Original Chimera** (slow, safe) | `0.02` | `0.015` | 2.20% | 1.30% | 0.75:1 | 42.9% |
+| **Default** (balanced) | `0.01` | `0.015` | 1.20% | 1.30% | 1.50:1 | 60.0% |
+| **Scalper** (fast, more trades) | `0.005` | `0.0075` | 0.70% | 0.55% | 1.50:1 | 60.0% |
+| **Extreme Scalper** (high churn) | `0.0025` | `0.005` | 0.45% | 0.30% | 2.00:1 | 66.7% |
+| **Symmetric Extreme** (1:1) | `0.0025` | `0.0025` | 0.45% | 0.10% | 1.00:1 | 50.0% |
+
+> **Note**: Smaller TPs mean more trades, more fee drag, and a higher required win rate. The bot's `config.validate()` will warn at startup if your break-even win rate exceeds 80%.
 | `MAX_HOLD_DAYS` | `3` | Force-close positions after N days |
 | `DIP_THRESHOLD_PCT` | `0.02` | Minimum 24h decline to trigger entry (2%) |
 | `TOP_N_COINS` | `50` | Market cap universe size |

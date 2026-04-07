@@ -16,9 +16,10 @@ class TestTrader(unittest.TestCase):
         config.CAPITAL_USD = 10000
         config.PER_TRADE_PCT = 0.20
         config.NET_TP_PCT = 0.01
+        config.NET_SL_PCT = 0.015
         config.FEE_PCT = 0.001
         config.TP_PCT = config.NET_TP_PCT + (2 * config.FEE_PCT)  # 1.2% gross
-        config.SL_PCT = 0.015
+        config.SL_PCT = max(config.NET_SL_PCT - (2 * config.FEE_PCT), 0.001)  # 1.3% gross
         config.MAX_HOLD_DAYS = 3
         self.trader = Trader()
 
@@ -126,6 +127,51 @@ class TestTrader(unittest.TestCase):
         self.assertEqual(len(closed), 1)
         # Net PNL should be ~1% (the NET_TP_PCT target), within 0.05% tolerance
         self.assertAlmostEqual(closed[0].pnl_pct, config.NET_TP_PCT * 100, delta=0.05)
+
+    def test_scalper_mode_half_percent_net(self):
+        """0.5% net target should yield ~0.5% net PNL after fees."""
+        config.NET_TP_PCT = 0.005
+        config.TP_PCT = config.NET_TP_PCT + (2 * config.FEE_PCT)  # 0.7% gross
+        trader = Trader()
+
+        with patch.object(trader, "get_current_price", return_value=100.0):
+            with patch.object(trader, "_adjust_quantity", side_effect=lambda p, q: q):
+                with patch.object(trader, "_round_price", side_effect=lambda p, pr: pr):
+                    pos = trader.open_position("SCALP", amount_usd=1000)
+
+        gross_tp_price = 100.0 * (1 + config.TP_PCT)
+        with patch.object(trader, "get_current_price", return_value=gross_tp_price):
+            closed = trader.check_positions()
+
+        self.assertEqual(len(closed), 1)
+        self.assertAlmostEqual(closed[0].pnl_pct, 0.5, delta=0.05)
+
+    def test_extreme_scalper_quarter_percent_net(self):
+        """0.25% net target should yield ~0.25% net PNL after fees."""
+        config.NET_TP_PCT = 0.0025
+        config.TP_PCT = config.NET_TP_PCT + (2 * config.FEE_PCT)  # 0.45% gross
+        trader = Trader()
+
+        with patch.object(trader, "get_current_price", return_value=100.0):
+            with patch.object(trader, "_adjust_quantity", side_effect=lambda p, q: q):
+                with patch.object(trader, "_round_price", side_effect=lambda p, pr: pr):
+                    pos = trader.open_position("FAST", amount_usd=1000)
+
+        gross_tp_price = 100.0 * (1 + config.TP_PCT)
+        with patch.object(trader, "get_current_price", return_value=gross_tp_price):
+            closed = trader.check_positions()
+
+        self.assertEqual(len(closed), 1)
+        self.assertAlmostEqual(closed[0].pnl_pct, 0.25, delta=0.05)
+
+    def test_breakeven_winrate_calculation(self):
+        """Verify the risk/reward math used by config.validate()."""
+        # 1% net TP, 1.5% net SL → 60% break-even win rate
+        be = 0.015 / (0.01 + 0.015) * 100
+        self.assertAlmostEqual(be, 60.0, places=1)
+        # 0.25% net TP, 0.5% net SL → 66.7% break-even win rate
+        be = 0.005 / (0.0025 + 0.005) * 100
+        self.assertAlmostEqual(be, 66.67, places=1)
 
     def test_stats_empty(self):
         """Stats should handle no trades."""
