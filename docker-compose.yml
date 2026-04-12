@@ -1,0 +1,26 @@
+services:
+  # Spot paper trading bot (default)
+  bot-spot:
+    build: .
+    container_name: tradingbot23-spot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - ENGINE=spot
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: ["python", "-m", "bot.main", "--mode", "paper", "--engine", "spot"]
+
+  # Futures paper trading bot (optional — uncomment to run side-by-side)
+  # bot-futures:
+  #   build: .
+  #   container_name: tradingbot23-futures
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   environment:
+  #     - ENGINE=futures
+  #   volumes:
+  #     - ./data:/app/data
+  #     - ./logs:/app/logs
+  #   command: ["python", "-m", "bot.main", "--mode", "paper", "--engine", "futures"]
