@@ -1,26 +1,63 @@
+# ============================================
+# TradingBot23 — Multi-User Docker Setup
+#
+# Add a user:    bash add-user.sh
+# Start one:     docker compose --profile ikel up -d
+# Start all:     docker compose --profile '*' up -d
+# View logs:     docker compose --profile ikel logs -f
+# Stop one:      docker compose --profile ikel down
+# Stop all:      docker compose down --remove-orphans
+# ============================================
+
+x-bot-base: &bot-base
+  build: .
+  restart: unless-stopped
+
 services:
-  # Spot paper trading bot (default)
-  bot-spot:
-    build: .
-    container_name: tradingbot23-spot
-    restart: unless-stopped
-    env_file: .env
+  # ----- User: ikel -----
+  ikel-spot:
+    <<: *bot-base
+    container_name: tb23-ikel-spot
+    profiles: ["ikel"]
+    env_file: users/ikel/.env
     environment:
       - ENGINE=spot
+      - DATA_DIR=/app/data
+      - LOG_DIR=/app/logs
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - ./users/ikel/data:/app/data
+      - ./users/ikel/logs:/app/logs
     command: ["python", "-m", "bot.main", "--mode", "paper", "--engine", "spot"]
 
-  # Futures paper trading bot (optional — uncomment to run side-by-side)
-  # bot-futures:
-  #   build: .
-  #   container_name: tradingbot23-futures
-  #   restart: unless-stopped
-  #   env_file: .env
+  # Uncomment to also run futures for ikel:
+  # ikel-futures:
+  #   <<: *bot-base
+  #   container_name: tb23-ikel-futures
+  #   profiles: ["ikel"]
+  #   env_file: users/ikel/.env
   #   environment:
   #     - ENGINE=futures
+  #     - DATA_DIR=/app/data-futures
+  #     - LOG_DIR=/app/logs-futures
   #   volumes:
-  #     - ./data:/app/data
-  #     - ./logs:/app/logs
+  #     - ./users/ikel/data-futures:/app/data-futures
+  #     - ./users/ikel/logs-futures:/app/logs-futures
   #   command: ["python", "-m", "bot.main", "--mode", "paper", "--engine", "futures"]
+
+  # ----- User: friend -----
+  # After running: bash add-user.sh  (enter "friend" as username)
+  # Uncomment this block:
+
+  # friend-spot:
+  #   <<: *bot-base
+  #   container_name: tb23-friend-spot
+  #   profiles: ["friend"]
+  #   env_file: users/friend/.env
+  #   environment:
+  #     - ENGINE=spot
+  #     - DATA_DIR=/app/data
+  #     - LOG_DIR=/app/logs
+  #   volumes:
+  #     - ./users/friend/data:/app/data
+  #     - ./users/friend/logs:/app/logs
+  #   command: ["python", "-m", "bot.main", "--mode", "paper", "--engine", "spot"]
