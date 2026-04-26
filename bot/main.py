@@ -20,6 +20,7 @@ from bot.modules.data_fetcher import DataFetcher
 from bot.modules.futures_trader import FuturesTrader
 from bot.modules.strategy import Strategy
 from bot.modules.trader import Trader
+from bot.setup_wizard import ensure_setup
 
 # Graceful shutdown
 _running = True
@@ -174,6 +175,14 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if not ensure_setup():
+        print("Setup cancelled.")
+        sys.exit(0)
+
+    # Reload config after wizard may have written .env
+    from importlib import reload
+    reload(config)
 
     # Override config trading mode from CLI
     config.TRADING_MODE = args.mode
