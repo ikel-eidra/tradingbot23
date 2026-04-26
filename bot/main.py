@@ -115,6 +115,35 @@ def run_trading(force_snapshot: bool = False):
                 stats.get("win_rate", 0), stats.get("total_pnl", 0))
 
 
+def run_dashboard(force_snapshot: bool = False):
+    """Launch the GUI dashboard with live trading."""
+    setup_logging()
+    logger = logging.getLogger(__name__)
+
+    try:
+        config.validate()
+    except ValueError as e:
+        logger.error(str(e))
+        sys.exit(1)
+
+    logger.info("Launching dashboard in %s mode (%s engine)",
+                config.TRADING_MODE.upper(), config.ENGINE.upper())
+
+    fetcher = DataFetcher()
+    if config.ENGINE == "futures":
+        trader = FuturesTrader()
+    else:
+        trader = Trader()
+    strategy = Strategy(fetcher=fetcher, trader=trader)
+
+    if force_snapshot:
+        strategy.refresh_basket()
+
+    from bot.dashboard import Dashboard
+    dashboard = Dashboard(strategy)
+    dashboard.run()
+
+
 def run_backtest(start_str: str, end_str: str):
     """Run historical backtest."""
     setup_logging()
@@ -173,6 +202,10 @@ def main():
         "--force-snapshot", action="store_true",
         help="Force a new monthly snapshot regardless of date",
     )
+    parser.add_argument(
+        "--dashboard", action="store_true",
+        help="Launch the live GUI dashboard instead of console mode",
+    )
 
     args = parser.parse_args()
 
@@ -191,6 +224,8 @@ def main():
 
     if args.mode == "backtest":
         run_backtest(args.start, args.end)
+    elif args.dashboard:
+        run_dashboard(force_snapshot=args.force_snapshot)
     else:
         run_trading(force_snapshot=args.force_snapshot)
 
