@@ -53,6 +53,7 @@ class FuturesPosition:
     pnl_pct: float = 0.0     # NET PNL on margin, after fees + funding
     pnl_usd: float = 0.0
     funding_paid: float = 0.0
+    breakeven_armed: bool = False
 
 
 class FuturesTrader:
@@ -172,6 +173,25 @@ class FuturesTrader:
                 logger.warning("Already have open futures position for %s, skipping", symbol)
                 return None
 
+        # Cooldown: skip if a recent SL or LIQUIDATION on this symbol
+        if config.LOSS_COOLDOWN_HOURS > 0:
+            now = datetime.now(timezone.utc)
+            cooldown = timedelta(hours=config.LOSS_COOLDOWN_HOURS)
+            loss_states = (FuturesPositionStatus.SL_HIT, FuturesPositionStatus.LIQUIDATED)
+            for pos in self.positions:
+                if (
+                    pos.symbol == symbol
+                    and pos.status in loss_states
+                    and pos.exit_time is not None
+                    and (now - pos.exit_time) < cooldown
+                ):
+                    remaining = cooldown - (now - pos.exit_time)
+                    logger.info(
+                        "[COOLDOWN-FUT] %s — recent loss, skipping (%.1fh left)",
+                        symbol, remaining.total_seconds() / 3600,
+                    )
+                    return None
+
         portfolio_value = self.get_portfolio_value()
         margin_usd = margin_usd or (portfolio_value * config.PER_TRADE_PCT)
 
@@ -254,6 +274,23 @@ class FuturesTrader:
                 self._close(pos, pos.liquidation_price, FuturesPositionStatus.LIQUIDATED, now)
                 closed.append(pos)
                 continue
+
+            # Break-even SL: lift SL to entry+fees once price moves
+            # +BREAK_EVEN_TRIGGER_PCT in our favor (price terms, not margin).
+            if (
+                not pos.breakeven_armed
+                and config.BREAK_EVEN_TRIGGER_PCT > 0
+                and price >= pos.entry_price * (1 + config.BREAK_EVEN_TRIGGER_PCT)
+            ):
+                fee_drag_price = (2 * config.FUTURES_FEE_PCT * pos.leverage) / pos.leverage
+                new_sl = pos.entry_price * (1 + fee_drag_price)
+                if new_sl > pos.sl_price and new_sl > pos.liquidation_price:
+                    logger.info(
+                        "[BREAK-EVEN-FUT] %s armed — SL $%.4f -> $%.4f",
+                        pos.symbol, pos.sl_price, new_sl,
+                    )
+                    pos.sl_price = new_sl
+                    pos.breakeven_armed = True
 
             if price >= pos.tp_price:
                 self._close(pos, pos.tp_price, FuturesPositionStatus.TP_HIT, now)

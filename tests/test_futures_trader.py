@@ -18,6 +18,8 @@ class TestFuturesTrader(unittest.TestCase):
         config.FUTURES_NET_TP_PCT = 0.005
         config.FUTURES_NET_SL_PCT = 0.0075
         config.MAX_HOLD_DAYS = 3
+        config.BREAK_EVEN_TRIGGER_PCT = 0.005
+        config.LOSS_COOLDOWN_HOURS = 24
         self.trader = FuturesTrader()
 
     def test_leverage_clamp(self):
@@ -74,6 +76,24 @@ class TestFuturesTrader(unittest.TestCase):
         with patch.object(self.trader, "get_current_price", return_value=100.05):
             closed = self.trader.check_positions()
         self.assertEqual(closed[0].status, FuturesPositionStatus.EXPIRED)
+
+    def test_breakeven_arms_after_profit(self):
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            pos = self.trader.open_position("ETH", margin_usd=1000)
+        original_sl = pos.sl_price
+        with patch.object(self.trader, "get_current_price", return_value=100.6):
+            self.trader.check_positions()
+        self.assertTrue(pos.breakeven_armed)
+        self.assertGreater(pos.sl_price, original_sl)
+
+    def test_loss_cooldown_blocks_reentry(self):
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            self.trader.open_position("DUMP", margin_usd=500)
+        with patch.object(self.trader, "get_current_price", return_value=99.0):
+            self.trader.check_positions()
+        with patch.object(self.trader, "get_current_price", return_value=99.0):
+            new_pos = self.trader.open_position("DUMP", margin_usd=500)
+        self.assertIsNone(new_pos)
 
 
 if __name__ == "__main__":

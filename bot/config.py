@@ -52,6 +52,21 @@ if _SL_OVERRIDE is not None:
 MAX_HOLD_DAYS = int(os.getenv("MAX_HOLD_DAYS", "3"))  # Auto-close after 3 days
 DIP_THRESHOLD_PCT = float(os.getenv("DIP_THRESHOLD_PCT", "0.02"))  # -2% dip to enter
 
+# --- Win-rate enhancers ---
+# Once unrealized PNL crosses +BREAK_EVEN_TRIGGER_PCT, slide SL up to
+# entry+fees. Converts many losers into break-evens. Set to 0 to disable.
+BREAK_EVEN_TRIGGER_PCT = float(os.getenv("BREAK_EVEN_TRIGGER_PCT", "0.005"))
+
+# After a STOP-LOSS hit on a coin, refuse new entries on that coin for
+# this many hours. Prevents stacking losses on a coin in a clear downtrend.
+# Set to 0 to disable.
+LOSS_COOLDOWN_HOURS = float(os.getenv("LOSS_COOLDOWN_HOURS", "24"))
+
+# Skip new entries when BTC's 1h change is below this (negative) value.
+# Avoids buying alts during broad market dumps. Set to None to disable.
+_BTC_FILTER = os.getenv("BTC_REGIME_FILTER_PCT", "-0.015")
+BTC_REGIME_FILTER_PCT = float(_BTC_FILTER) if _BTC_FILTER and _BTC_FILTER.lower() != "none" else None
+
 # --- Coin Selection ---
 TOP_N_COINS = int(os.getenv("TOP_N_COINS", "50"))
 TOP_N_LOSERS = int(os.getenv("TOP_N_LOSERS", "10"))

@@ -47,6 +47,7 @@ class Position:
     buy_order_id: str | None = None
     tp_order_id: str | None = None
     sl_order_id: str | None = None
+    breakeven_armed: bool = False
 
 
 class Trader:
@@ -158,6 +159,25 @@ class Trader:
             if pos.symbol == symbol and pos.status == PositionStatus.OPEN:
                 logger.warning("Already have an open position for %s, skipping", symbol)
                 return None
+
+        # Cooldown: skip if a recent SL hit on this symbol
+        if config.LOSS_COOLDOWN_HOURS > 0:
+            now = datetime.now(timezone.utc)
+            cooldown = timedelta(hours=config.LOSS_COOLDOWN_HOURS)
+            for pos in self.positions:
+                if (
+                    pos.symbol == symbol
+                    and pos.status == PositionStatus.SL_HIT
+                    and pos.exit_time is not None
+                    and (now - pos.exit_time) < cooldown
+                ):
+                    remaining = cooldown - (now - pos.exit_time)
+                    logger.info(
+                        "[COOLDOWN] %s — recent SL %.1fh ago, skipping (%.1fh left)",
+                        symbol, (now - pos.exit_time).total_seconds() / 3600,
+                        remaining.total_seconds() / 3600,
+                    )
+                    return None
 
         pair = self._get_trading_pair(symbol)
         # Dynamic compounding: use current portfolio value, not initial capital
@@ -283,6 +303,22 @@ class Trader:
             current_price = self.get_current_price(pos.symbol)
             if current_price is None:
                 continue
+
+            # Break-even SL: once price moves +BREAK_EVEN_TRIGGER_PCT in our
+            # favor, slide SL up to entry+fees so we exit flat on a reversal.
+            if (
+                not pos.breakeven_armed
+                and config.BREAK_EVEN_TRIGGER_PCT > 0
+                and current_price >= pos.entry_price * (1 + config.BREAK_EVEN_TRIGGER_PCT)
+            ):
+                new_sl = pos.entry_price * (1 + 2 * config.FEE_PCT)
+                if new_sl > pos.sl_price:
+                    logger.info(
+                        "[BREAK-EVEN] %s armed — SL moved $%.4f -> $%.4f",
+                        pos.symbol, pos.sl_price, new_sl,
+                    )
+                    pos.sl_price = new_sl
+                    pos.breakeven_armed = True
 
             # Check TP
             if current_price >= pos.tp_price:

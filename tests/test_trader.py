@@ -21,6 +21,8 @@ class TestTrader(unittest.TestCase):
         config.TP_PCT = config.NET_TP_PCT + (2 * config.FEE_PCT)  # 1.2% gross
         config.SL_PCT = max(config.NET_SL_PCT - (2 * config.FEE_PCT), 0.001)  # 1.3% gross
         config.MAX_HOLD_DAYS = 3
+        config.BREAK_EVEN_TRIGGER_PCT = 0.005
+        config.LOSS_COOLDOWN_HOURS = 24
         self.trader = Trader()
 
     def test_portfolio_value_initial(self):
@@ -177,6 +179,82 @@ class TestTrader(unittest.TestCase):
         """Stats should handle no trades."""
         stats = self.trader.get_stats()
         self.assertEqual(stats["total_trades"], 0)
+
+    def test_breakeven_sl_arms_after_profit(self):
+        """SL should slide up to entry+fees after price moves above trigger."""
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            with patch.object(self.trader, "_adjust_quantity", side_effect=lambda p, q: q):
+                with patch.object(self.trader, "_round_price", side_effect=lambda p, pr: pr):
+                    pos = self.trader.open_position("BE", amount_usd=1000)
+
+        original_sl = pos.sl_price
+        # Trigger break-even by moving +0.6% (above the 0.5% threshold)
+        with patch.object(self.trader, "get_current_price", return_value=100.6):
+            self.trader.check_positions()
+
+        self.assertTrue(pos.breakeven_armed)
+        self.assertGreater(pos.sl_price, original_sl)
+        # New SL should be at or above entry × (1 + 2*FEE_PCT)
+        self.assertGreaterEqual(pos.sl_price, 100.0 * (1 + 2 * config.FEE_PCT) - 1e-9)
+
+    def test_breakeven_sl_protects_from_loss(self):
+        """After break-even is armed, a reversal exits flat instead of at SL."""
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            with patch.object(self.trader, "_adjust_quantity", side_effect=lambda p, q: q):
+                with patch.object(self.trader, "_round_price", side_effect=lambda p, pr: pr):
+                    pos = self.trader.open_position("BE2", amount_usd=1000)
+
+        # Arm break-even
+        with patch.object(self.trader, "get_current_price", return_value=100.6):
+            self.trader.check_positions()
+
+        # Now reverse below entry — should hit the new (break-even) SL, not the old one
+        with patch.object(self.trader, "get_current_price", return_value=100.05):
+            closed = self.trader.check_positions()
+
+        self.assertEqual(len(closed), 1)
+        # PNL should be near zero (within fee dust), not the original -1.5% loss
+        self.assertGreater(closed[0].pnl_pct, -0.5)
+
+    def test_loss_cooldown_blocks_reentry(self):
+        """After a SL hit, new position on same symbol should be blocked."""
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            with patch.object(self.trader, "_adjust_quantity", side_effect=lambda p, q: q):
+                with patch.object(self.trader, "_round_price", side_effect=lambda p, pr: pr):
+                    self.trader.open_position("DUMP", amount_usd=1000)
+
+        # Hit SL
+        with patch.object(self.trader, "get_current_price", return_value=98.0):
+            self.trader.check_positions()
+
+        # Try to reopen same symbol
+        with patch.object(self.trader, "get_current_price", return_value=98.0):
+            with patch.object(self.trader, "_adjust_quantity", side_effect=lambda p, q: q):
+                with patch.object(self.trader, "_round_price", side_effect=lambda p, pr: pr):
+                    new_pos = self.trader.open_position("DUMP", amount_usd=1000)
+
+        self.assertIsNone(new_pos)
+
+    def test_loss_cooldown_expires(self):
+        """After cooldown expires, re-entry on same symbol should work."""
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            with patch.object(self.trader, "_adjust_quantity", side_effect=lambda p, q: q):
+                with patch.object(self.trader, "_round_price", side_effect=lambda p, pr: pr):
+                    self.trader.open_position("AGAIN", amount_usd=1000)
+
+        with patch.object(self.trader, "get_current_price", return_value=98.0):
+            self.trader.check_positions()
+
+        # Backdate the SL exit beyond the cooldown window
+        sl_pos = next(p for p in self.trader.positions if p.status == PositionStatus.SL_HIT)
+        sl_pos.exit_time = datetime.now(timezone.utc) - timedelta(hours=config.LOSS_COOLDOWN_HOURS + 1)
+
+        with patch.object(self.trader, "get_current_price", return_value=98.0):
+            with patch.object(self.trader, "_adjust_quantity", side_effect=lambda p, q: q):
+                with patch.object(self.trader, "_round_price", side_effect=lambda p, pr: pr):
+                    new_pos = self.trader.open_position("AGAIN", amount_usd=1000)
+
+        self.assertIsNotNone(new_pos)
 
 
 if __name__ == "__main__":
