@@ -113,6 +113,7 @@ FUTURES_DIP_THRESHOLD_PCT = float(os.getenv("FUTURES_DIP_THRESHOLD_PCT", "0.005"
 STABLECOIN_SYMBOLS = {
     "USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDP", "PYUSD",
     "USDE", "USD1", "USDD", "FRAX", "LUSD", "SUSD", "GUSD", "CUSD",
+    "USDS", "USDX", "CUSDC", "ALUSD", "DOLA", "BEAN", "USDJ", "HUSD",
 }
 
 # --- Paths ---
