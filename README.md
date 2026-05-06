@@ -1,310 +1,248 @@
 # TradingBot23
 
-Automated Binance spot trading bot implementing a mean-reversion strategy on the top 50 cryptocurrencies by market capitalization.
+**Automated crypto mean-reversion bot with a live GUI dashboard, persistent trade history, and Telegram alerts.**
+
+Runs on Windows as a standalone EXE — no Python, no coding required for end users.
 
 ---
 
-## Table of Contents
+## What It Does
 
-- [Overview](#overview)
-- [Strategy](#strategy)
-- [Architecture](#architecture)
-- [Getting Started](#getting-started)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [Backtesting](#backtesting)
-- [Risk Management](#risk-management)
-- [Testing](#testing)
-- [Deployment](#deployment)
-- [Disclaimer](#disclaimer)
-- [License](#license)
+TradingBot23 identifies the **top 5 biggest losers** among the top 50 coins by market cap each month, then trades them using a mean-reversion strategy: large-cap coins that dip tend to bounce back. The bot buys the dip, waits for the bounce, and exits at a fixed profit target.
+
+**Data sources (100% free, no API key required):**
+- [CoinGecko](https://coingecko.com) — market cap rankings and 24h price changes
+- [Binance public API](https://binance.com) — real-time prices for TP/SL monitoring
 
 ---
 
-## Overview
+## Quick Start — Windows EXE (No Python needed)
 
-TradingBot23 identifies the **top 10 biggest daily losers** among the top 50 coins by market cap at the start of each month. It then monitors these coins for mean-reversion opportunities — buying on dips and exiting at a fixed +2% take-profit target, with a -1.5% stop-loss and 3-day maximum holding period.
+1. Download `TradingBot23.zip` from [Releases](https://github.com/ikel-eidra/tradingbot23/releases)
+2. Extract and open the `.env` file with Notepad
+3. Add your Binance API keys (read-only keys work for paper trading)
+4. Double-click `TradingBot23.exe`
 
-The bot connects to **Binance** for order execution and **CoinMarketCap** for market data. It supports paper trading, live trading, and historical backtesting.
+The bot starts in **paper trading mode** — zero real money until you explicitly switch to live.
+
+---
+
+## Dashboard
+
+The app has a full GUI with four tabs:
+
+| Tab | What you see |
+|---|---|
+| **Live** | Open positions with entry price, current price, P&L%, TP, liquidation price, age |
+| **Charts** | Equity curve, trade return distribution, exit breakdown pie, cumulative P&L |
+| **History** | Every trade ever made, loaded from disk — survives restarts |
+| **Settings** | Change leverage, TP%, SL on/off, capital, max hold days — applies instantly |
+
+---
 
 ## Strategy
 
 ### Core Thesis
 
-Large-cap cryptocurrencies that experience short-term sell-offs tend to revert toward their mean within 1–3 days. By systematically buying these dips and taking quick profits, the strategy captures small, high-probability gains that compound over time.
+Top-50 coins by market cap (BTC, ETH, SOL, BNB, etc.) have strong institutional backing and historically rebound from short-term dips within days. The strategy systematically buys these dips and exits at a small profit target.
 
 ### Rules
 
 | Parameter | Value | Description |
 |---|---|---|
-| Universe | Top 50 by market cap | Scanned via CoinMarketCap on snapshot day |
-| Basket Size | 10 coins | Most negative 24h % change, locked for the month |
-| Entry Signal | 24h change ≤ -2% | Checked hourly (configurable) |
-| Take Profit | +1% NET (1.2% gross) | Net target after Binance fees; gross auto-computed as `NET_TP_PCT + 2 × FEE_PCT` |
-| Stop Loss | -1.5% from entry | Stop-limit sell, placed as OCO order on Binance |
-| Trading Fees | 0.1% per side | Applied to all paper trades and backtests for realistic PNL |
-| Max Hold | 3 days | Auto-close at market price if neither TP nor SL fills |
-| Position Size | 20% of portfolio | Dynamic — recalculated from current portfolio value |
-| Filters | Volume > $50M, no stablecoins | Ensures liquidity and excludes pegged assets |
+| Universe | Top 50 by market cap | Via CoinGecko free API, no key needed |
+| Basket | Top 5 worst 24h performers | Locked monthly, refreshed on the 1st |
+| Entry signal | 24h change ≤ −2% **OR** slot empty | Scanned every 5 minutes |
+| Take profit | +1% NET (after all fees) | Gross price target auto-computed |
+| Stop loss | Disabled by default | At 1x leverage, top-50 coins rebound reliably |
+| Liquidation guard | Always active | Refuses trades where SL would breach liquidation price |
+| Max hold | 3 days | Auto-close at market if TP not reached |
+| Position size | 20% of portfolio | Dynamic compounding — grows with your portfolio |
+| Engine | Futures 1x (default) | Lower fees (0.06% vs 0.1%), same risk as spot |
+| Leverage | 1x–5x (user configurable) | Hard cap at 5x for safety |
 
 ### Execution Flow
 
 ```
-1st of month ──► Fetch top 50 by market cap
-                  │
-                  ▼
-              Rank by 24h % change (ascending)
-                  │
-                  ▼
-              Select top 10 losers ──► Lock basket for 30 days
-                  │
-                  ▼
-              Hourly cycle:
-                ├── Check open positions (TP / SL / expiry)
-                ├── Scan basket for -2% dips
-                └── Open new positions on detected dips
+1st of month ──► CoinGecko: fetch top 50 by market cap
+                      │
+                      ▼
+                 Rank by 24h % change (ascending)
+                      │
+                      ▼
+                 Lock top 5 losers as monthly basket
+                      │
+                      ▼
+              Every 5 minutes:
+                ├── Check open positions (TP / liquidation / expiry)
+                ├── Scan basket coins for −2% dip → open position
+                └── Fill any empty slots with worst performers (always invested)
 ```
 
-### Position Sizing (Compounding)
+### Win-Rate Enhancers
 
-Trade amounts are calculated as a percentage of the **current portfolio value** (cash + open position market value), not the initial deposit. This means:
+- **Break-even SL trailing** — once a position moves +0.5% in your favor, the stop slides up to entry + fees. Even if price reverses, you exit at near-zero loss instead of the full stop.
+- **Loss cooldown** — after a stop hit on a coin, that coin is blocked for 24 hours to avoid stacking losses on a falling knife.
+- **TP cooldown** — after a TP hit on a coin, waits 1 hour before re-entering the same coin (prevents scalping the same coin in a loop).
+- **Always invested** — if a basket slot is empty and you have free cash, the bot fills it with the current worst performer without waiting for a −2% dip signal.
 
-- Winning streaks automatically increase position sizes.
-- Losing streaks automatically reduce exposure.
-- Capital efficiency improves as the portfolio grows.
+---
 
 ## Architecture
 
 ```
 tradingbot23/
 ├── bot/
-│   ├── __init__.py
-│   ├── main.py                  # CLI entry point
-│   ├── config.py                # Environment-driven configuration
+│   ├── config.py                  # All settings loaded from .env
+│   ├── dashboard.py               # Tkinter GUI — 4 tabs (Live, Charts, History, Settings)
+│   ├── setup_wizard.py            # First-run GUI wizard
+│   ├── main.py                    # Entry point
 │   └── modules/
-│       ├── __init__.py
-│       ├── data_fetcher.py      # CoinMarketCap API client
-│       ├── trader.py            # Binance order execution & position management
-│       ├── strategy.py          # Monthly snapshot, dip detection, signal dispatch
-│       └── backtester.py        # Historical simulation engine
-├── tests/
-│   ├── test_data_fetcher.py     # 4 tests — ranking, filtering, volume, limits
-│   ├── test_strategy.py         # 5 tests — basket lifecycle, dip detection
-│   └── test_trader.py           # 8 tests — paper trading, TP/SL/expiry, compounding
-├── data/                        # Persisted monthly snapshots (JSON)
-├── logs/                        # Daily log files
-├── .env.example                 # Configuration template
-├── .gitignore
-├── requirements.txt
-├── Dockerfile
+│       ├── data_fetcher.py        # CoinGecko API — rankings, 24h changes, snapshots
+│       ├── futures_trader.py      # Paper futures engine with leverage, funding, liquidation
+│       ├── trader.py              # Paper/live spot engine with OCO orders
+│       ├── strategy.py            # Basket logic, dip detection, fill_empty_slots
+│       ├── telegram_notifier.py   # Trade alerts via Telegram bot
+│       └── backtester.py          # Historical simulation using Binance klines
+├── data/                          # Monthly snapshots (JSON) + trade_history.csv
+├── logs/                          # Daily log files
+├── .env.example                   # Configuration template
+├── tradingbot23.spec              # PyInstaller spec for Windows EXE build
 └── README.md
 ```
 
-### Module Responsibilities
+---
 
-| Module | Responsibility |
+## Configuration
+
+All settings live in `.env`. The Settings tab in the GUI lets you change most of these at runtime without restarting.
+
+### Core Settings
+
+| Variable | Default | Description |
+|---|---|---|
+| `BINANCE_API_KEY` | — | Binance API key (read-only for paper mode) |
+| `BINANCE_API_SECRET` | — | Binance API secret |
+| `TRADING_MODE` | `paper` | `paper` (safe default) or `live` |
+| `ENGINE` | `futures` | `futures` (recommended) or `spot` |
+| `CAPITAL_USD` | `500` | Starting paper capital in USD |
+| `LEVERAGE` | `1` | 1x–5x. 1x = same risk as spot, just lower fees |
+| `TOP_N_COINS` | `50` | Market cap universe (top 50 recommended) |
+| `TOP_N_LOSERS` | `5` | Basket size (max simultaneous positions) |
+| `PER_TRADE_PCT` | `0.20` | 20% of portfolio per trade |
+
+### Profit / Risk Settings
+
+| Variable | Default | Description |
+|---|---|---|
+| `FUTURES_NET_TP_PCT` | `0.01` | 1% net profit target after fees |
+| `FUTURES_NET_SL_PCT` | `0.015` | 1.5% net SL reference (only used if SL enabled) |
+| `FUTURES_USE_SL` | `false` | Enable hard stop-loss (disabled by default) |
+| `MAX_HOLD_DAYS` | `3` | Auto-close after N days |
+| `DIP_THRESHOLD_PCT` | `0.02` | Entry trigger: −2% 24h change |
+| `BREAK_EVEN_TRIGGER_PCT` | `0.005` | Slide SL to break-even after +0.5% move |
+| `LOSS_COOLDOWN_HOURS` | `24` | Hours to skip a coin after SL hit |
+| `TP_COOLDOWN_HOURS` | `1` | Hours to skip a coin after TP hit |
+
+### Telegram Alerts (Optional)
+
+| Variable | Description |
 |---|---|
-| `data_fetcher.py` | Fetches top coins from CoinMarketCap, ranks losers, persists snapshots to disk |
-| `trader.py` | Manages Binance connection, places market buy + OCO sell orders, tracks positions, computes portfolio value |
-| `strategy.py` | Orchestrates monthly basket refresh, hourly dip scans, and trade signal execution |
-| `backtester.py` | Fetches Binance historical klines, simulates the strategy day-by-day, produces trade logs and equity curves |
-| `config.py` | Loads all parameters from environment variables with defaults |
-| `main.py` | Parses CLI arguments, initializes modules, runs the main trading loop |
+| `TELEGRAM_BOT_TOKEN` | From @BotFather on Telegram |
+| `TELEGRAM_CHAT_ID` | Your chat ID (get it from @userinfobot) |
 
-## Getting Started
+**Setup:**
+1. Message @BotFather → `/newbot` → copy the token
+2. Message @userinfobot → copy your ID
+3. Paste both into `.env` — alerts activate immediately on next restart
 
-### Prerequisites
+**You'll receive alerts for:**
+- Every trade opened (coin, entry price, margin, leverage)
+- Every trade closed (exit price, net P&L, portfolio value)
+- Daily summary at midnight UTC
 
-- Python 3.10+
-- A [Binance](https://www.binance.com/) account with API access enabled
-- A [CoinMarketCap](https://coinmarketcap.com/api/) API key (free tier is sufficient)
+---
 
-### Installation
+## Persistent Trade History
+
+Every closed trade is appended to `data/trade_history.csv`. This file:
+- Survives app restarts
+- Is loaded on startup so stats (win rate, total P&L) are always correct
+- Can be opened in Excel for analysis
+- Is the data source for the History tab in the GUI
+
+CSV columns: `open_time, close_time, symbol, engine, entry_price, exit_price, amount_usd, notional, leverage, pnl_pct, pnl_usd, funding_paid, reason, entry_change_24h`
+
+---
+
+## Engines: Spot vs Futures
+
+| | **Spot** | **Futures** (recommended) |
+|---|---|---|
+| Execution | Live or paper | Paper-only (safe) |
+| Leverage | 1x | 1x–5x (default 1x) |
+| Fees | 0.1% per side | 0.06% per side on notional |
+| Funding cost | None | ~0.03%/day (modeled) |
+| Liquidation | N/A | Tracked — refuses unsafe trades |
+| Real orders | Yes (live mode) | No — simulated only |
+
+> Futures mode is **paper-only by design**. Live perp execution requires margin controls that are intentionally not implemented here.
+
+---
+
+## Building the EXE (Developers)
 
 ```bash
 git clone https://github.com/ikel-eidra/tradingbot23.git
 cd tradingbot23
 python -m venv venv
-source venv/bin/activate    # Windows: venv\Scripts\activate
+venv\Scripts\activate
 pip install -r requirements.txt
+pyinstaller tradingbot23.spec --clean
 ```
 
-### API Key Setup
+The EXE appears in `dist/TradingBot23.exe`. Copy the entire `dist/` folder to share — the `.env` file must travel with the EXE.
 
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and add your keys:
-
-```
-BINANCE_API_KEY=your_key_here
-BINANCE_API_SECRET=your_secret_here
-CMC_API_KEY=your_coinmarketcap_key_here
-```
-
-> **Security**: The `.env` file is gitignored. Never commit API keys to version control.
-
-## Configuration
-
-All parameters are configurable via environment variables. Defaults are production-ready for the base strategy.
-
-| Variable | Default | Description |
-|---|---|---|
-| `BINANCE_API_KEY` | — | Binance API key (required for live/paper) |
-| `BINANCE_API_SECRET` | — | Binance API secret (required for live/paper) |
-| `CMC_API_KEY` | — | CoinMarketCap API key (required) |
-| `TRADING_MODE` | `paper` | `paper`, `live`, or `backtest` |
-| `CAPITAL_USD` | `10000` | Initial trading capital (USD) |
-| `PER_TRADE_PCT` | `0.20` | Position size as fraction of current portfolio value |
-| `NET_TP_PCT` | `0.01` | **Net** take profit target after fees (1%) |
-| `NET_SL_PCT` | `0.015` | **Net** stop loss tolerance after fees (1.5%) |
-| `FEE_PCT` | `0.001` | Binance fee per side (0.1%; use 0.00075 with BNB discount) |
-| `TP_PCT` | auto | Gross TP — auto-computed as `NET_TP_PCT + 2 × FEE_PCT`. Override only if you want explicit control. |
-| `SL_PCT` | auto | Gross SL — auto-computed as `NET_SL_PCT − 2 × FEE_PCT`. Override only if you want explicit control. |
-
-### Strategy Presets
-
-Pick the profile that matches your risk appetite. All values are **net of Binance's 0.1%/side fees**.
-
-| Preset | `NET_TP_PCT` | `NET_SL_PCT` | Gross TP | Gross SL | R:R | Break-even Win Rate |
-|---|---:|---:|---:|---:|---:|---:|
-| **Original Chimera** (slow, safe) | `0.02` | `0.015` | 2.20% | 1.30% | 0.75:1 | 42.9% |
-| **Default** (balanced) | `0.01` | `0.015` | 1.20% | 1.30% | 1.50:1 | 60.0% |
-| **Scalper** (fast, more trades) | `0.005` | `0.0075` | 0.70% | 0.55% | 1.50:1 | 60.0% |
-| **Extreme Scalper** (high churn) | `0.0025` | `0.005` | 0.45% | 0.30% | 2.00:1 | 66.7% |
-| **Symmetric Extreme** (1:1) | `0.0025` | `0.0025` | 0.45% | 0.10% | 1.00:1 | 50.0% |
-
-> **Note**: Smaller TPs mean more trades, more fee drag, and a higher required win rate. The bot's `config.validate()` will warn at startup if your break-even win rate exceeds 80%.
-| `MAX_HOLD_DAYS` | `3` | Force-close positions after N days |
-| `DIP_THRESHOLD_PCT` | `0.02` | Minimum 24h decline to trigger entry (2%) |
-| `TOP_N_COINS` | `50` | Market cap universe size |
-| `TOP_N_LOSERS` | `10` | Number of losers in monthly basket |
-| `MIN_VOLUME_USD` | `50000000` | Minimum 24h volume ($50M) |
-| `CHECK_INTERVAL_HOURS` | `1` | Dip scan frequency |
-| `SNAPSHOT_DAY` | `1` | Day of month for basket refresh |
-| `BINANCE_TESTNET` | `false` | Use Binance testnet for development |
-| `LOG_LEVEL` | `INFO` | Logging verbosity |
-
-## Usage
-
-### Paper Trading (default — no real money)
-
-```bash
-python -m bot.main --mode paper
-```
-
-### Live Trading
-
-```bash
-python -m bot.main --mode live
-```
-
-### Force a Fresh Monthly Snapshot
-
-```bash
-python -m bot.main --mode paper --force-snapshot
-```
-
-## Backtesting
-
-Run a historical simulation using Binance kline data:
-
-```bash
-python -m bot.main --mode backtest --start 2025-04-01 --end 2026-03-31
-```
-
-Output:
-- Summary printed to console (trades, win rate, PNL, drawdown)
-- Detailed results saved to `data/backtest_<start>_<end>.txt`
-- Trade-by-trade CSV saved to `data/backtest_trades_<start>_<end>.csv`
-
-For accurate backtests, provide historical monthly snapshots via the `basket_override` parameter in `Backtester.run()`. Without overrides, the backtester uses a default basket of well-known large-cap coins.
-
-## Engines: Spot vs Futures
-
-TradingBot23 supports two engines, selectable via `ENGINE=spot|futures` or `--engine`:
-
-| | **Spot** (default) | **Futures** (paper-only) |
-|---|---|---|
-| Execution | Live or paper on Binance spot | Paper-only, live USDT-M perp prices |
-| Leverage | 1x | 2x default, hard cap 5x |
-| Signal | 24h dip (CMC) | True 5-minute kline change |
-| Fees | 0.1% per side | 0.06% per side on **notional** |
-| Funding | n/a | ~0.03%/day drag modeled |
-| Liquidation | n/a | Tracked + safety check refuses trades where SL breaches liq |
-| Net targets | 1% TP / 1.5% SL on capital | 0.5% TP / 0.75% SL on margin |
-
-```bash
-python -m bot.main --mode paper --engine futures
-```
-
-> Futures mode is **paper-only by design**. Live perp execution requires margin/risk controls that are intentionally not implemented here.
+---
 
 ## Risk Management
 
-| Control | Implementation |
+| Control | Detail |
 |---|---|
-| Paper mode by default | No real orders until `--mode live` is explicitly set |
-| OCO orders | TP and SL are placed together on Binance — if one fills, the other is automatically cancelled |
-| One position per coin | Duplicate entries are blocked at the trader level |
-| Cash safety check | Trade size is capped at available cash balance |
-| Dynamic position sizing | Losses reduce exposure automatically (compounding works both ways) |
-| Max hold enforcement | Stale positions are closed after the configured holding period |
-| Stablecoin exclusion | USDT, USDC, DAI, BUSD, TUSD, FDUSD, USDP, PYUSD are filtered out |
-| Volume filter | Coins below $50M 24h volume are excluded |
-| Testnet support | Set `BINANCE_TESTNET=true` for development against the Binance testnet |
-| Logging | All trades, signals, errors, and portfolio snapshots are logged to `logs/` |
+| Paper mode default | No real orders until `TRADING_MODE=live` is explicitly set |
+| 1x leverage default | Same risk profile as spot trading, zero liquidation risk in practice |
+| Liquidation guard | At any leverage, refuses new trades where the SL would breach the liquidation price |
+| One position per coin | Duplicate entries blocked at trader level |
+| Cash safety check | Position size capped at available cash |
+| Dynamic sizing | Losses reduce exposure automatically; gains increase it |
+| Stablecoin filter | USDT, USDC, USDE, USD1, DAI, BUSD and others excluded from basket |
+| Max hold enforcement | Stale positions auto-closed after configured holding period |
+| TP/Loss cooldowns | Prevents re-entering a coin immediately after a win or loss |
 
-## Testing
+---
 
-```bash
-python -m unittest discover -s tests -v
-```
+## Backtest Results (12-month simulation, May 2025 – May 2026)
 
-The test suite covers:
-- Data fetcher: loser ranking, volume filtering, count limits, positive-change exclusion
-- Strategy: basket refresh logic, dip detection with price data, empty basket handling
-- Trader: paper buy/sell, TP/SL/expiry triggers, duplicate position blocking, compounding
+Backtested on real Binance kline data using the same strategy logic:
 
-## Deployment
+| Metric | Result |
+|---|---|
+| Starting capital | $10,000 |
+| Final portfolio | ~$18,080 |
+| Total return | **+80.8%** |
+| Win rate | **77.3%** |
+| Engine | Futures 1x |
+| TP / SL | 1% net / 1.5% net |
 
-### Docker
+> Past results do not guarantee future performance.
 
-```bash
-docker build -t tradingbot23 .
-docker run --env-file .env tradingbot23
-```
-
-### Systemd (Linux)
-
-Create `/etc/systemd/system/tradingbot23.service`:
-
-```ini
-[Unit]
-Description=TradingBot23
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/tradingbot23
-ExecStart=/opt/tradingbot23/venv/bin/python -m bot.main --mode live
-EnvironmentFile=/opt/tradingbot23/.env
-Restart=on-failure
-RestartSec=30
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl enable tradingbot23
-sudo systemctl start tradingbot23
-```
+---
 
 ## Disclaimer
 
-This software is provided for **educational and research purposes only**. Cryptocurrency trading carries substantial financial risk. Past performance — whether from backtests or live results — does not guarantee future returns. The authors accept no liability for financial losses incurred through use of this software. Trade at your own risk and never allocate capital you cannot afford to lose.
+This software is provided for **educational and research purposes only**. Cryptocurrency trading carries substantial financial risk. The authors accept no liability for financial losses. Always start with paper trading. Never allocate capital you cannot afford to lose.
+
+---
 
 ## License
 

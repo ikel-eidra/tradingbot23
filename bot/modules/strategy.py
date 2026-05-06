@@ -79,35 +79,24 @@ class Strategy:
         return coins
 
     def detect_dips(self) -> list[dict]:
-        """Check current prices of basket coins and detect dips.
+        """Check current 24h change for basket coins using CoinGecko data.
 
-        A dip is when the 24h change is <= -DIP_THRESHOLD_PCT.
-        CMC data is fetched once per cycle (not per coin) to avoid
-        excessive API calls and rate limiting.
-
-        Returns:
-            List of coin dicts that are currently dipping.
+        Works for both spot and futures engines — the dip signal is always
+        based on 24h price change, not 5m data.
         """
         if not self.basket:
             logger.warning("No basket set — cannot detect dips")
             return []
 
-        if self.is_futures:
-            return self._detect_dips_futures()
-
-        # Fetch fresh market data once for all coins (not inside the loop)
         try:
             fresh_coins = self.fetcher.get_top_coins()
         except Exception:
             logger.exception("Failed to fetch fresh market data for dip detection")
             return []
+
         fresh_data = {c["symbol"]: c for c in fresh_coins}
+        threshold  = -(config.DIP_THRESHOLD_PCT * 100)
 
-        # DIP_THRESHOLD_PCT is stored as decimal (0.02 = 2%).
-        # CMC returns percent_change_24h as percentage (-3.5 means -3.5%).
-        threshold = -(config.DIP_THRESHOLD_PCT * 100)
-
-        basket_symbols = {c["symbol"] for c in self.basket}
         dipping = []
         for coin in self.basket:
             symbol = coin["symbol"]
@@ -115,16 +104,13 @@ class Strategy:
                 logger.debug("No fresh data for %s, skipping", symbol)
                 continue
 
-            change_24h = fresh_data[symbol]["percent_change_24h"]
+            change_24h    = fresh_data[symbol]["percent_change_24h"]
             current_price = fresh_data[symbol]["price"]
 
             if change_24h <= threshold:
-                coin_with_price = {**coin, "current_price": current_price, "change_24h": change_24h}
-                dipping.append(coin_with_price)
-                logger.info(
-                    "DIP detected: %s at $%.4f (24h: %+.2f%%)",
-                    symbol, current_price, change_24h,
-                )
+                dipping.append({**coin, "current_price": current_price, "change_24h": change_24h})
+                logger.info("DIP detected: %s at $%.4f (24h: %+.2f%%)",
+                            symbol, current_price, change_24h)
 
         return dipping
 
@@ -198,14 +184,72 @@ class Strategy:
                 logger.debug("Skipping %s — already have open position", symbol)
                 continue
 
-            position = self.trader.open_position(symbol)
+            cg_price   = coin.get("current_price")
+            change_24h = coin.get("change_24h", 0.0)
+            if self.is_futures:
+                position = self.trader.open_position(
+                    symbol, entry_price=cg_price, entry_change_24h=change_24h,
+                )
+            else:
+                position = self.trader.open_position(
+                    symbol, entry_price=cg_price, entry_change_24h=change_24h,
+                )
             if position:
                 opened.append(position)
 
         return opened
 
+    def fill_empty_slots(self) -> list:
+        """Fill any open position slots with basket coins (no dip threshold required).
+
+        Ensures capital is always fully deployed. Picks the worst 24h performers
+        from the basket that aren't already held, sorted worst-first.
+        """
+        if not self.basket:
+            return []
+
+        open_positions = self.trader.get_open_positions()
+        open_symbols   = {p.symbol for p in open_positions}
+        slots          = config.TOP_N_LOSERS - len(open_positions)
+        if slots <= 0 or self.trader.cash_balance < 10:
+            return []
+
+        try:
+            fresh_coins = self.fetcher.get_top_coins()
+        except Exception:
+            logger.exception("Failed to fetch market data for fill_empty_slots")
+            return []
+
+        fresh_data = {c["symbol"]: c for c in fresh_coins}
+
+        candidates = []
+        for coin in self.basket:
+            sym = coin["symbol"]
+            if sym in open_symbols or sym not in fresh_data:
+                continue
+            candidates.append({
+                **coin,
+                "current_price": fresh_data[sym]["price"],
+                "change_24h":    fresh_data[sym]["percent_change_24h"],
+            })
+
+        candidates.sort(key=lambda c: c["change_24h"])
+
+        opened = []
+        for coin in candidates[:slots]:
+            position = self.trader.open_position(
+                coin["symbol"],
+                entry_price=coin["current_price"],
+                entry_change_24h=coin["change_24h"],
+            )
+            if position:
+                logger.info("[FILL] Opened %s (24h: %+.2f%%) to fill empty slot",
+                            coin["symbol"], coin["change_24h"])
+                opened.append(position)
+        return opened
+
     def run_cycle(self) -> dict:
-        """Run one full strategy cycle (snapshot check + dip scan + trade).
+        """Run one full strategy cycle (snapshot check + dip scan + fill + trade).
 
         Returns:
             Summary dict of actions taken.
@@ -217,6 +261,7 @@ class Strategy:
             "dips_found": 0,
             "positions_opened": 0,
             "positions_closed": 0,
+            "slots_filled": 0,
         }
 
         # Step 1: Check if we need a new basket
@@ -228,26 +273,29 @@ class Strategy:
         closed = self.trader.check_positions()
         summary["positions_closed"] = len(closed)
 
-        # Step 3: Detect dips
+        # Step 3: Detect dips and open on dip signals
         dipping = self.detect_dips()
         summary["dips_found"] = len(dipping)
-
-        # Step 4: Execute signals
         if dipping:
             opened = self.execute_signals(dipping)
             summary["positions_opened"] = len(opened)
+
+        # Step 4: Fill any remaining empty slots (always invested)
+        filled = self.fill_empty_slots()
+        summary["slots_filled"] = len(filled)
 
         # Log summary
         stats = self.trader.get_stats()
         portfolio = self.trader.get_portfolio_value()
         logger.info(
-            "Cycle complete | Portfolio: $%.2f | Open: %d | Closed today: %d | "
-            "Dips: %d | New trades: %d | Total trades: %d | Win rate: %.1f%%",
+            "Cycle complete | Portfolio: $%.2f | Open: %d | Closed: %d | "
+            "Dips: %d | Opened: %d | Filled: %d | Total: %d | Win rate: %.1f%%",
             portfolio,
             len(self.trader.get_open_positions()),
             summary["positions_closed"],
             summary["dips_found"],
             summary["positions_opened"],
+            summary["slots_filled"],
             stats.get("total_trades", 0),
             stats.get("win_rate", 0),
         )

@@ -12,6 +12,7 @@ Key differences vs spot:
 - Fees are charged on NOTIONAL value, not margin (so leverage multiplies fee drag)
 """
 
+import csv
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -21,8 +22,29 @@ from binance.client import Client as BinanceClient
 from binance.exceptions import BinanceAPIException
 
 from bot import config
+from bot.modules import telegram_notifier as tg
 
 logger = logging.getLogger(__name__)
+
+_CSV_HEADER = [
+    "open_time", "close_time", "symbol", "engine",
+    "entry_price", "exit_price", "amount_usd", "notional", "leverage",
+    "pnl_pct", "pnl_usd", "funding_paid", "reason", "entry_change_24h",
+]
+
+
+def _history_csv():
+    return config.DATA_DIR / "trade_history.csv"
+
+
+def _append_trade_csv(row: dict) -> None:
+    path = _history_csv()
+    write_header = not path.exists()
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=_CSV_HEADER)
+        if write_header:
+            w.writeheader()
+        w.writerow(row)
 
 
 class FuturesPositionStatus(str, Enum):
@@ -54,6 +76,9 @@ class FuturesPosition:
     pnl_usd: float = 0.0
     funding_paid: float = 0.0
     breakeven_armed: bool = False
+    last_known_price: float | None = None  # cached by trading thread, read by UI
+    amount_usd: float = 0.0               # margin committed at entry
+    entry_change_24h: float = 0.0         # 24h % change that triggered the buy
 
 
 class FuturesTrader:
@@ -73,6 +98,7 @@ class FuturesTrader:
         self.positions: list[FuturesPosition] = []
         self.cash_balance = config.CAPITAL_USD  # Free margin
         self._client: BinanceClient | None = None
+        self._load_trade_history()
 
         logger.info(
             "FuturesTrader initialized | Leverage: %dx | Fee: %.3f%% per side | "
@@ -144,14 +170,11 @@ class FuturesTrader:
         return ((curr_close - prev_close) / prev_close) * 100
 
     def get_portfolio_value(self) -> float:
-        """Cash balance + unrealized margin value of open positions."""
+        """Cash balance + unrealized margin value using cached prices (no UI-thread API calls)."""
         unrealized = 0.0
         for pos in self.positions:
             if pos.status == FuturesPositionStatus.OPEN:
-                price = self.get_current_price(pos.symbol)
-                if price is None:
-                    unrealized += pos.margin_used
-                    continue
+                price = pos.last_known_price or pos.entry_price
                 price_change = (price - pos.entry_price) / pos.entry_price
                 unrealized += pos.margin_used * (1 + price_change * pos.leverage)
         return self.cash_balance + unrealized
@@ -165,7 +188,8 @@ class FuturesTrader:
         return entry * (1 - (1 / leverage) + 0.005)
 
     def open_position(
-        self, symbol: str, margin_usd: float | None = None
+        self, symbol: str, margin_usd: float | None = None,
+        entry_price: float | None = None, entry_change_24h: float = 0.0,
     ) -> FuturesPosition | None:
         """Open a paper futures long with TP, SL, and liquidation tracking."""
         for pos in self.positions:
@@ -173,9 +197,10 @@ class FuturesTrader:
                 logger.warning("Already have open futures position for %s, skipping", symbol)
                 return None
 
-        # Cooldown: skip if a recent SL or LIQUIDATION on this symbol
+        now = datetime.now(timezone.utc)
+
+        # Loss cooldown: skip if recent SL or LIQUIDATION on this symbol
         if config.LOSS_COOLDOWN_HOURS > 0:
-            now = datetime.now(timezone.utc)
             cooldown = timedelta(hours=config.LOSS_COOLDOWN_HOURS)
             loss_states = (FuturesPositionStatus.SL_HIT, FuturesPositionStatus.LIQUIDATED)
             for pos in self.positions:
@@ -192,6 +217,23 @@ class FuturesTrader:
                     )
                     return None
 
+        # TP cooldown: skip if this coin was just closed on a TP hit recently
+        if config.TP_COOLDOWN_HOURS > 0:
+            tp_cooldown = timedelta(hours=config.TP_COOLDOWN_HOURS)
+            for pos in self.positions:
+                if (
+                    pos.symbol == symbol
+                    and pos.status == FuturesPositionStatus.TP_HIT
+                    and pos.exit_time is not None
+                    and (now - pos.exit_time) < tp_cooldown
+                ):
+                    remaining = tp_cooldown - (now - pos.exit_time)
+                    logger.info(
+                        "[TP-COOLDOWN] %s — just hit TP, waiting %.0fm before re-entry",
+                        symbol, remaining.total_seconds() / 60,
+                    )
+                    return None
+
         portfolio_value = self.get_portfolio_value()
         margin_usd = margin_usd or (portfolio_value * config.PER_TRADE_PCT)
 
@@ -201,7 +243,7 @@ class FuturesTrader:
             logger.warning("Cash too low ($%.2f) — skipping %s", margin_usd, symbol)
             return None
 
-        price = self.get_current_price(symbol)
+        price = entry_price or self.get_current_price(symbol)
         if price is None:
             return None
 
@@ -245,6 +287,8 @@ class FuturesTrader:
             tp_price=tp_price,
             sl_price=sl_price,
             liquidation_price=liq_price,
+            amount_usd=margin_usd,
+            entry_change_24h=entry_change_24h,
         )
         self.positions.append(position)
 
@@ -254,6 +298,8 @@ class FuturesTrader:
             symbol, quantity, price, margin_usd, notional,
             tp_price, sl_price, liq_price, entry_fee,
         )
+        tg.alert_opened(symbol, price, tp_price, liq_price,
+                        margin_usd, self.leverage, entry_change_24h)
         return position
 
     def check_positions(self) -> list[FuturesPosition]:
@@ -265,43 +311,47 @@ class FuturesTrader:
             if pos.status != FuturesPositionStatus.OPEN:
                 continue
 
-            price = self.get_current_price(pos.symbol)
+            try:
+                price = self.get_current_price(pos.symbol)
+            except Exception:
+                price = None
             if price is None:
                 continue
+            pos.last_known_price = price
 
-            # Liquidation check FIRST — worst case wins
+            # Liquidation safety check (at 1x this is ~99% adverse move — almost impossible)
             if price <= pos.liquidation_price:
                 self._close(pos, pos.liquidation_price, FuturesPositionStatus.LIQUIDATED, now)
                 closed.append(pos)
                 continue
 
-            # Break-even SL: lift SL to entry+fees once price moves
-            # +BREAK_EVEN_TRIGGER_PCT in our favor (price terms, not margin).
-            if (
-                not pos.breakeven_armed
-                and config.BREAK_EVEN_TRIGGER_PCT > 0
-                and price >= pos.entry_price * (1 + config.BREAK_EVEN_TRIGGER_PCT)
-            ):
-                fee_drag_price = (2 * config.FUTURES_FEE_PCT * pos.leverage) / pos.leverage
-                new_sl = pos.entry_price * (1 + fee_drag_price)
-                if new_sl > pos.sl_price and new_sl > pos.liquidation_price:
-                    logger.info(
-                        "[BREAK-EVEN-FUT] %s armed — SL $%.4f -> $%.4f",
-                        pos.symbol, pos.sl_price, new_sl,
-                    )
-                    pos.sl_price = new_sl
-                    pos.breakeven_armed = True
+            if config.FUTURES_USE_SL:
+                # Optional break-even trailing SL
+                if (
+                    not pos.breakeven_armed
+                    and config.BREAK_EVEN_TRIGGER_PCT > 0
+                    and price >= pos.entry_price * (1 + config.BREAK_EVEN_TRIGGER_PCT)
+                ):
+                    fee_drag_price = (2 * config.FUTURES_FEE_PCT * pos.leverage) / pos.leverage
+                    new_sl = pos.entry_price * (1 + fee_drag_price)
+                    if new_sl > pos.sl_price and new_sl > pos.liquidation_price:
+                        logger.info("[BREAK-EVEN-FUT] %s armed — SL $%.4f -> $%.4f",
+                                    pos.symbol, pos.sl_price, new_sl)
+                        pos.sl_price = new_sl
+                        pos.breakeven_armed = True
 
+                if price <= pos.sl_price:
+                    self._close(pos, pos.sl_price, FuturesPositionStatus.SL_HIT, now)
+                    closed.append(pos)
+                    continue
+
+            # TP hit
             if price >= pos.tp_price:
                 self._close(pos, pos.tp_price, FuturesPositionStatus.TP_HIT, now)
                 closed.append(pos)
                 continue
 
-            if price <= pos.sl_price:
-                self._close(pos, pos.sl_price, FuturesPositionStatus.SL_HIT, now)
-                closed.append(pos)
-                continue
-
+            # Max hold — exit at market, top-50 coins rebound given time
             if (now - pos.entry_time) > timedelta(days=config.MAX_HOLD_DAYS):
                 self._close(pos, price, FuturesPositionStatus.EXPIRED, now)
                 closed.append(pos)
@@ -340,6 +390,9 @@ class FuturesTrader:
                 "[PAPER-FUT] 💀 LIQUIDATED %s @ $%.4f | Lost margin $%.2f | Cash: $%.2f",
                 pos.symbol, exit_price, pos.margin_used, self.cash_balance,
             )
+            self._save_trade(pos)
+            tg.alert_closed(pos.symbol, pos.entry_price, exit_price,
+                            pos.pnl_pct, pos.pnl_usd, reason.value, self.cash_balance)
             return
 
         self.cash_balance += pos.margin_used + net_pnl_usd
@@ -349,6 +402,73 @@ class FuturesTrader:
             pos.symbol, exit_price, reason.value, pos.pnl_pct, net_pnl_usd,
             exit_fee, funding_cost, self.cash_balance,
         )
+        self._save_trade(pos)
+        tg.alert_closed(pos.symbol, pos.entry_price, exit_price,
+                        pos.pnl_pct, pos.pnl_usd, reason.value, self.cash_balance)
+
+    def _save_trade(self, pos: FuturesPosition) -> None:
+        try:
+            _append_trade_csv({
+                "open_time":       pos.entry_time.isoformat(),
+                "close_time":      pos.exit_time.isoformat() if pos.exit_time else "",
+                "symbol":          pos.symbol,
+                "engine":          "futures",
+                "entry_price":     round(pos.entry_price, 8),
+                "exit_price":      round(pos.exit_price, 8) if pos.exit_price else "",
+                "amount_usd":      round(pos.amount_usd, 4),
+                "notional":        round(pos.notional, 4),
+                "leverage":        pos.leverage,
+                "pnl_pct":         round(pos.pnl_pct, 4),
+                "pnl_usd":         round(pos.pnl_usd, 4),
+                "funding_paid":    round(pos.funding_paid, 4),
+                "reason":          pos.status.value,
+                "entry_change_24h": round(pos.entry_change_24h, 4),
+            })
+        except Exception:
+            logger.exception("Failed to save trade to CSV")
+
+    def _load_trade_history(self) -> None:
+        path = _history_csv()
+        if not path.exists():
+            return
+        loaded = 0
+        with open(path, "r", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if row.get("engine") != "futures":
+                    continue
+                try:
+                    status = FuturesPositionStatus(row["reason"])
+                    pos = FuturesPosition(
+                        symbol=row["symbol"],
+                        entry_price=float(row["entry_price"]),
+                        quantity=0.0,
+                        margin_used=float(row["amount_usd"]),
+                        notional=float(row["notional"]),
+                        leverage=int(row["leverage"]),
+                        entry_time=datetime.fromisoformat(row["open_time"]),
+                        tp_price=0.0,
+                        sl_price=0.0,
+                        liquidation_price=0.0,
+                        status=status,
+                        exit_price=float(row["exit_price"]) if row.get("exit_price") else None,
+                        exit_time=datetime.fromisoformat(row["close_time"]) if row.get("close_time") else None,
+                        pnl_pct=float(row["pnl_pct"]),
+                        pnl_usd=float(row["pnl_usd"]),
+                        funding_paid=float(row["funding_paid"]),
+                        amount_usd=float(row["amount_usd"]),
+                        entry_change_24h=float(row["entry_change_24h"]),
+                    )
+                    self.positions.append(pos)
+                    loaded += 1
+                except Exception:
+                    logger.debug("Skipped unreadable history row", exc_info=True)
+        if loaded:
+            past_pnl = sum(p.pnl_usd for p in self.positions)
+            self.cash_balance = config.CAPITAL_USD + past_pnl
+            logger.info(
+                "Loaded %d closed trades | Past P&L: $%+.2f | Restored balance: $%.2f",
+                loaded, past_pnl, self.cash_balance,
+            )
 
     def get_open_positions(self) -> list[FuturesPosition]:
         return [p for p in self.positions if p.status == FuturesPositionStatus.OPEN]

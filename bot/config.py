@@ -4,19 +4,24 @@ Loads settings from environment variables (.env file) with sensible defaults.
 """
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load .env from project root
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# When frozen by PyInstaller, __file__ resolves inside the temp extraction dir.
+# The .env the setup wizard writes lives next to the EXE instead.
+if getattr(sys, "frozen", False):
+    PROJECT_ROOT = Path(sys.executable).parent
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 load_dotenv(PROJECT_ROOT / ".env")
 
 
 # --- API Keys ---
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
-CMC_API_KEY = os.getenv("CMC_API_KEY", "")
 
 # --- Trading Mode ---
 # "live" = real orders, "paper" = simulated, "backtest" = historical
@@ -62,6 +67,11 @@ BREAK_EVEN_TRIGGER_PCT = float(os.getenv("BREAK_EVEN_TRIGGER_PCT", "0.005"))
 # Set to 0 to disable.
 LOSS_COOLDOWN_HOURS = float(os.getenv("LOSS_COOLDOWN_HOURS", "24"))
 
+# After a TP hit on a coin, wait this many hours before re-entering.
+# Prevents the bot from scalping the same coin in a loop.
+# Set to 0 to disable (re-enter immediately).
+TP_COOLDOWN_HOURS = float(os.getenv("TP_COOLDOWN_HOURS", "1"))
+
 # Skip new entries when BTC's 1h change is below this (negative) value.
 # Avoids buying alts during broad market dumps. Set to None to disable.
 _BTC_FILTER = os.getenv("BTC_REGIME_FILTER_PCT", "-0.015")
@@ -69,20 +79,21 @@ BTC_REGIME_FILTER_PCT = float(_BTC_FILTER) if _BTC_FILTER and _BTC_FILTER.lower(
 
 # --- Coin Selection ---
 TOP_N_COINS = int(os.getenv("TOP_N_COINS", "50"))
-TOP_N_LOSERS = int(os.getenv("TOP_N_LOSERS", "10"))
+TOP_N_LOSERS = int(os.getenv("TOP_N_LOSERS", "5"))
 MIN_VOLUME_USD = float(os.getenv("MIN_VOLUME_USD", "50000000"))  # $50M
 SNAPSHOT_DAY = int(os.getenv("SNAPSHOT_DAY", "1"))  # Day of month
 
 # --- Bot Operation ---
 CHECK_INTERVAL_HOURS = float(os.getenv("CHECK_INTERVAL_HOURS", "1"))
+POSITION_CHECK_MINS = float(os.getenv("POSITION_CHECK_MINS", "5"))  # how often to check TP/SL
 
 # --- Engine selection ---
 # "spot"    = Binance spot trading (default, no leverage)
 # "futures" = Binance USDT-M Perpetual Futures (paper-only initially)
-ENGINE = os.getenv("ENGINE", "spot")
+ENGINE = os.getenv("ENGINE", "futures")
 
 # --- Futures settings (only used when ENGINE=futures) ---
-LEVERAGE = int(os.getenv("LEVERAGE", "2"))  # 2x default — conservative
+LEVERAGE = int(os.getenv("LEVERAGE", "1"))  # 1x — same risk as spot, lower fees
 MAX_LEVERAGE = 5  # Hard cap for safety
 FUTURES_FEE_PCT = float(os.getenv("FUTURES_FEE_PCT", "0.0006"))  # 0.06% taker (Binance USDT-M)
 # Average daily funding cost as % of notional. Binance posts every 8h.
@@ -90,13 +101,19 @@ FUTURES_FEE_PCT = float(os.getenv("FUTURES_FEE_PCT", "0.0006"))  # 0.06% taker (
 FUNDING_RATE_DAILY = float(os.getenv("FUNDING_RATE_DAILY", "0.0003"))
 # Net targets when running futures — usually smaller because leverage amplifies them.
 # At 2x leverage, a 0.5% net price move = ~1% net PNL on margin.
-FUTURES_NET_TP_PCT = float(os.getenv("FUTURES_NET_TP_PCT", "0.005"))  # 0.5% net on margin
-FUTURES_NET_SL_PCT = float(os.getenv("FUTURES_NET_SL_PCT", "0.0075"))  # 0.75% net on margin
+FUTURES_NET_TP_PCT = float(os.getenv("FUTURES_NET_TP_PCT", "0.01"))   # 1% net — matches backtest
+FUTURES_NET_SL_PCT = float(os.getenv("FUTURES_NET_SL_PCT", "0.015"))  # 1.5% net — reference only when SL disabled
+# At 1x leverage, top-50 coins historically rebound — hold until TP or expiry, no SL.
+# Set to "true" only if you want hard stop-losses re-enabled.
+FUTURES_USE_SL = os.getenv("FUTURES_USE_SL", "false").lower() == "true"
 # 5-minute dip threshold for futures (smaller than spot's 24h threshold)
 FUTURES_DIP_THRESHOLD_PCT = float(os.getenv("FUTURES_DIP_THRESHOLD_PCT", "0.005"))  # -0.5% in 5m
 
 # --- Stablecoins to exclude ---
-STABLECOIN_SYMBOLS = {"USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDP", "PYUSD"}
+STABLECOIN_SYMBOLS = {
+    "USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDP", "PYUSD",
+    "USDE", "USD1", "USDD", "FRAX", "LUSD", "SUSD", "GUSD", "CUSD",
+}
 
 # --- Paths ---
 # Can be overridden per-user via env vars (multi-user Docker setup).
@@ -108,6 +125,10 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # --- Binance ---
 # Use testnet for paper trading
 BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
+
+# --- Telegram alerts ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # --- Logging ---
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -124,8 +145,6 @@ def validate():
             errors.append("BINANCE_API_KEY is required for live trading")
         if not BINANCE_API_SECRET:
             errors.append("BINANCE_API_SECRET is required for live trading")
-    if not CMC_API_KEY:
-        errors.append("CMC_API_KEY is required to fetch market data")
     if errors:
         raise ValueError("Configuration errors:\n" + "\n".join(f"  - {e}" for e in errors))
 

@@ -4,6 +4,7 @@ Handles order placement (market buy, limit sell TP, stop-limit SL),
 position tracking, and order management.
 """
 
+import csv
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,7 @@ from binance.client import Client as BinanceClient
 from binance.exceptions import BinanceAPIException
 
 from bot import config
+from bot.modules.futures_trader import _append_trade_csv
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +46,14 @@ class Position:
     exit_price: float | None = None
     exit_time: datetime | None = None
     pnl_pct: float = 0.0
+    pnl_usd: float = 0.0
     buy_order_id: str | None = None
     tp_order_id: str | None = None
     sl_order_id: str | None = None
     breakeven_armed: bool = False
+    last_known_price: float | None = None  # updated by trading thread, read by UI
+    amount_usd: float = 0.0               # USD invested at entry
+    entry_change_24h: float = 0.0         # 24h % change that triggered the buy
 
 
 class Trader:
@@ -62,6 +68,7 @@ class Trader:
         self.cash_balance = config.CAPITAL_USD  # Tracks available cash (paper mode)
         self._client: BinanceClient | None = None
         self._symbol_info_cache: dict = {}
+        self._load_trade_history()
 
     @property
     def client(self) -> BinanceClient:
@@ -144,7 +151,7 @@ class Trader:
             logger.error("Failed to get price for %s: %s", pair, e)
             return None
 
-    def open_position(self, symbol: str, amount_usd: float | None = None) -> Position | None:
+    def open_position(self, symbol: str, amount_usd: float | None = None, entry_price: float | None = None, entry_change_24h: float = 0.0) -> Position | None:
         """Open a new spot position with TP and SL.
 
         Args:
@@ -195,7 +202,7 @@ class Trader:
                 logger.warning("Cash balance too low ($%.2f), skipping %s", amount_usd, symbol)
                 return None
 
-        current_price = self.get_current_price(symbol)
+        current_price = entry_price or self.get_current_price(symbol)
         if current_price is None:
             return None
 
@@ -223,6 +230,8 @@ class Trader:
                 tp_price=tp_price,
                 sl_price=sl_price,
                 buy_order_id="PAPER",
+                amount_usd=gross_cost,
+                entry_change_24h=entry_change_24h,
             )
             self.positions.append(position)
             return position
@@ -279,6 +288,8 @@ class Trader:
                 buy_order_id=str(buy_order["orderId"]),
                 tp_order_id=tp_order_id,
                 sl_order_id=sl_order_id,
+                amount_usd=filled_qty * filled_price,
+                entry_change_24h=entry_change_24h,
             )
             self.positions.append(position)
             return position
@@ -300,9 +311,13 @@ class Trader:
             if pos.status != PositionStatus.OPEN:
                 continue
 
-            current_price = self.get_current_price(pos.symbol)
+            try:
+                current_price = self.get_current_price(pos.symbol)
+            except Exception:
+                current_price = None
             if current_price is None:
                 continue
+            pos.last_known_price = current_price
 
             # Break-even SL: once price moves +BREAK_EVEN_TRIGGER_PCT in our
             # favor, slide SL up to entry+fees so we exit flat on a reversal.
@@ -353,6 +368,9 @@ class Trader:
         entry_cost = pos.entry_price * (1 + config.FEE_PCT)
         exit_proceeds = exit_price * (1 - config.FEE_PCT)
         pos.pnl_pct = ((exit_proceeds - entry_cost) / entry_cost) * 100
+        pos.pnl_usd = (exit_proceeds - entry_cost) * pos.quantity
+
+        self._save_trade(pos)
 
         if self.paper_mode:
             # Return proceeds (minus sell fee) to cash balance
@@ -386,21 +404,77 @@ class Trader:
     def get_portfolio_value(self) -> float:
         """Calculate current portfolio value (cash + open position values).
 
-        This is used for dynamic/compounding position sizing — trades are
-        sized as a percentage of the CURRENT portfolio, not the initial capital.
+        Uses last_known_price cached by the trading thread to avoid blocking
+        the UI thread with live API calls.
         """
         open_value = 0.0
         for pos in self.positions:
             if pos.status == PositionStatus.OPEN:
-                current_price = self.get_current_price(pos.symbol)
-                if current_price is not None:
-                    open_value += pos.quantity * current_price
-                else:
-                    # Fallback to entry price if we can't fetch current
-                    open_value += pos.quantity * pos.entry_price
+                price = pos.last_known_price or pos.entry_price
+                open_value += pos.quantity * price
         total = self.cash_balance + open_value
         logger.debug("Portfolio value: $%.2f (cash: $%.2f, open: $%.2f)", total, self.cash_balance, open_value)
         return total
+
+    def _save_trade(self, pos: Position) -> None:
+        try:
+            _append_trade_csv({
+                "open_time":        pos.entry_time.isoformat(),
+                "close_time":       pos.exit_time.isoformat() if pos.exit_time else "",
+                "symbol":           pos.symbol,
+                "engine":           "spot",
+                "entry_price":      round(pos.entry_price, 8),
+                "exit_price":       round(pos.exit_price, 8) if pos.exit_price else "",
+                "amount_usd":       round(pos.amount_usd, 4),
+                "notional":         round(pos.amount_usd, 4),
+                "leverage":         1,
+                "pnl_pct":          round(pos.pnl_pct, 4),
+                "pnl_usd":          round(pos.pnl_usd, 4),
+                "funding_paid":     0,
+                "reason":           pos.status.value,
+                "entry_change_24h": round(pos.entry_change_24h, 4),
+            })
+        except Exception:
+            logger.exception("Failed to save trade to CSV")
+
+    def _load_trade_history(self) -> None:
+        from bot.modules.futures_trader import _history_csv  # noqa: PLC0415
+        path = _history_csv()
+        if not path.exists():
+            return
+        loaded = 0
+        with open(path, "r", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if row.get("engine") != "spot":
+                    continue
+                try:
+                    status = PositionStatus(row["reason"])
+                    pos = Position(
+                        symbol=row["symbol"],
+                        entry_price=float(row["entry_price"]),
+                        quantity=0.0,
+                        entry_time=datetime.fromisoformat(row["open_time"]),
+                        tp_price=0.0,
+                        sl_price=0.0,
+                        status=status,
+                        exit_price=float(row["exit_price"]) if row.get("exit_price") else None,
+                        exit_time=datetime.fromisoformat(row["close_time"]) if row.get("close_time") else None,
+                        pnl_pct=float(row["pnl_pct"]),
+                        pnl_usd=float(row["pnl_usd"]),
+                        amount_usd=float(row["amount_usd"]),
+                        entry_change_24h=float(row["entry_change_24h"]),
+                    )
+                    self.positions.append(pos)
+                    loaded += 1
+                except Exception:
+                    logger.debug("Skipped unreadable history row", exc_info=True)
+        if loaded:
+            past_pnl = sum(p.pnl_usd for p in self.positions)
+            self.cash_balance = config.CAPITAL_USD + past_pnl
+            logger.info(
+                "Loaded %d closed spot trades | Past P&L: $%+.2f | Restored balance: $%.2f",
+                loaded, past_pnl, self.cash_balance,
+            )
 
     def get_open_positions(self) -> list[Position]:
         """Return all currently open positions."""
