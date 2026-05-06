@@ -81,6 +81,7 @@ class FuturesPosition:
     pnl_usd: float = 0.0
     funding_paid: float = 0.0
     breakeven_armed: bool = False
+    crash_protected: bool = False         # True when emergency crash SL has been armed
     last_known_price: float | None = None  # cached by trading thread, read by UI
     amount_usd: float = 0.0               # margin committed at entry
     entry_change_24h: float = 0.0         # 24h % change that triggered the buy
@@ -332,10 +333,12 @@ class FuturesTrader:
                 closed.append(pos)
                 continue
 
-            if config.FUTURES_USE_SL:
-                # Optional break-even trailing SL
+            if config.FUTURES_USE_SL or pos.crash_protected:
+                # Optional break-even trailing SL (only in normal mode, not crash)
                 if (
-                    not pos.breakeven_armed
+                    config.FUTURES_USE_SL
+                    and not pos.crash_protected
+                    and not pos.breakeven_armed
                     and config.BREAK_EVEN_TRIGGER_PCT > 0
                     and price >= pos.entry_price * (1 + config.BREAK_EVEN_TRIGGER_PCT)
                 ):
@@ -479,6 +482,37 @@ class FuturesTrader:
                 loaded, past_pnl, self.cash_balance,
             )
 
+    def arm_crash_sl(self) -> int:
+        """Set emergency SL on all open positions at current_price × (1 - CRASH_SL_PCT).
+
+        Called when crash mode activates. Returns number of positions protected.
+        """
+        protected = 0
+        for pos in self.positions:
+            if pos.status != FuturesPositionStatus.OPEN:
+                continue
+            price = self.get_current_price(pos.symbol)
+            if price is None:
+                price = pos.last_known_price or pos.entry_price
+            emergency_sl = price * (1 - config.CRASH_SL_PCT)
+            # Only set if above liquidation price (safety)
+            if emergency_sl > pos.liquidation_price:
+                pos.sl_price = emergency_sl
+                pos.crash_protected = True
+                protected += 1
+                logger.warning(
+                    "[CRASH-SL] %s — emergency SL set at $%.4f (%.1f%% below current $%.4f)",
+                    pos.symbol, emergency_sl, config.CRASH_SL_PCT * 100, price,
+                )
+            else:
+                logger.warning(
+                    "[CRASH-SL] %s — emergency SL $%.4f would breach liquidation $%.4f, skipping",
+                    pos.symbol, emergency_sl, pos.liquidation_price,
+                )
+        if protected:
+            self._save_open_positions()
+        return protected
+
     def _save_open_positions(self) -> None:
         """Persist open positions and current cash balance to disk."""
         open_pos = [p for p in self.positions if p.status == FuturesPositionStatus.OPEN]
@@ -499,6 +533,7 @@ class FuturesTrader:
                     "amount_usd":        p.amount_usd,
                     "entry_change_24h":  p.entry_change_24h,
                     "breakeven_armed":   p.breakeven_armed,
+                    "crash_protected":   p.crash_protected,
                 }
                 for p in open_pos
             ],
@@ -533,6 +568,7 @@ class FuturesTrader:
                     amount_usd=p["amount_usd"],
                     entry_change_24h=p["entry_change_24h"],
                     breakeven_armed=p.get("breakeven_armed", False),
+                    crash_protected=p.get("crash_protected", False),
                     status=FuturesPositionStatus.OPEN,
                 )
                 self.positions.append(pos)

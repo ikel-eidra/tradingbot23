@@ -109,6 +109,16 @@ FUTURES_USE_SL = os.getenv("FUTURES_USE_SL", "false").lower() == "true"
 # 5-minute dip threshold for futures (smaller than spot's 24h threshold)
 FUTURES_DIP_THRESHOLD_PCT = float(os.getenv("FUTURES_DIP_THRESHOLD_PCT", "0.005"))  # -0.5% in 5m
 
+# --- Crash Detection ---
+# BTC 24h drop below this triggers crash mode: blocks entries + arms emergency SL.
+# -8% based on historical crashes (May 2021: -30%, Nov 2022: -16%, Aug 2024: -9%)
+CRASH_BTC_TRIGGER_PCT = float(os.getenv("CRASH_BTC_TRIGGER_PCT", "-0.08"))
+# BTC 24h must recover above this before normal trading resumes (hysteresis gap).
+CRASH_BTC_RECOVERY_PCT = float(os.getenv("CRASH_BTC_RECOVERY_PCT", "-0.05"))
+# Emergency SL is set this far below current price when crash mode activates.
+# 3% below current = protects most remaining margin while allowing small bounces.
+CRASH_SL_PCT = float(os.getenv("CRASH_SL_PCT", "0.03"))
+
 # --- Stablecoins to exclude ---
 STABLECOIN_SYMBOLS = {
     "USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDP", "PYUSD",

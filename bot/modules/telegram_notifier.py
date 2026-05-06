@@ -84,6 +84,26 @@ def alert_closed(symbol: str, entry_price: float, exit_price: float,
     )
 
 
+def alert_crash(btc_change: float, positions_protected: int) -> None:
+    mode = config.TRADING_MODE.upper()
+    _send(
+        f"🚨 <b>TradingBot23 [{mode}] — CRASH MODE ACTIVATED</b>\n"
+        f"BTC 24h change: <b>{btc_change:+.2f}%</b>\n"
+        f"All new entries BLOCKED\n"
+        f"Emergency SL armed on <b>{positions_protected}</b> open position(s)\n"
+        f"Will resume when BTC recovers above -5% 24h"
+    )
+
+
+def alert_crash_recovery(btc_change: float) -> None:
+    mode = config.TRADING_MODE.upper()
+    _send(
+        f"✅ <b>TradingBot23 [{mode}] — CRASH MODE LIFTED</b>\n"
+        f"BTC 24h change recovered to <b>{btc_change:+.2f}%</b>\n"
+        f"Normal trading resumed"
+    )
+
+
 def alert_summary(portfolio: float, cash: float, open_pos: int,
                   total_trades: int, win_rate: float, total_pnl_usd: float) -> None:
     mode = config.TRADING_MODE.upper()

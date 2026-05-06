@@ -11,6 +11,7 @@ from bot import config
 from bot.modules.data_fetcher import DataFetcher
 from bot.modules.futures_trader import FuturesTrader
 from bot.modules.trader import Trader
+from bot.modules import telegram_notifier as tg
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class Strategy:
         self.basket: list[dict] = []  # Current month's fixed coin basket
         self.basket_month: int | None = None  # Month the basket was set
         self.basket_year: int | None = None
+        self._crash_mode: bool = False
 
     def should_refresh_basket(self, now: datetime | None = None) -> bool:
         """Check if we need a new monthly snapshot."""
@@ -248,6 +250,40 @@ class Strategy:
                 opened.append(position)
         return opened
 
+    def _update_crash_mode(self) -> None:
+        """Check BTC 24h change and toggle crash mode accordingly."""
+        try:
+            fresh_coins = self.fetcher.get_top_coins()
+        except Exception:
+            logger.debug("Could not fetch coins for crash check")
+            return
+
+        btc_data = next((c for c in fresh_coins if c["symbol"] == "BTC"), None)
+        if btc_data is None:
+            return
+
+        btc_change = btc_data["percent_change_24h"] / 100  # convert % to decimal
+
+        was_crash = self._crash_mode
+
+        if not self._crash_mode and btc_change < config.CRASH_BTC_TRIGGER_PCT:
+            self._crash_mode = True
+            logger.warning(
+                "[CRASH-MODE] ACTIVATED — BTC 24h: %.2f%% (threshold: %.2f%%)",
+                btc_change * 100, config.CRASH_BTC_TRIGGER_PCT * 100,
+            )
+            if self.is_futures:
+                protected = self.trader.arm_crash_sl()
+                tg.alert_crash(btc_change * 100, protected)
+
+        elif self._crash_mode and btc_change > config.CRASH_BTC_RECOVERY_PCT:
+            self._crash_mode = False
+            logger.info(
+                "[CRASH-MODE] LIFTED — BTC 24h recovered to %.2f%% (threshold: %.2f%%)",
+                btc_change * 100, config.CRASH_BTC_RECOVERY_PCT * 100,
+            )
+            tg.alert_crash_recovery(btc_change * 100)
+
     def run_cycle(self) -> dict:
         """Run one full strategy cycle (snapshot check + dip scan + fill + trade).
 
@@ -273,16 +309,23 @@ class Strategy:
         closed = self.trader.check_positions()
         summary["positions_closed"] = len(closed)
 
-        # Step 3: Detect dips and open on dip signals
-        dipping = self.detect_dips()
-        summary["dips_found"] = len(dipping)
-        if dipping:
-            opened = self.execute_signals(dipping)
-            summary["positions_opened"] = len(opened)
+        # Step 2b: Crash detection — check BTC 24h change
+        self._update_crash_mode()
 
-        # Step 4: Fill any remaining empty slots (always invested)
-        filled = self.fill_empty_slots()
-        summary["slots_filled"] = len(filled)
+        # Step 3 & 4: Skip entries entirely if crash mode is active
+        if self._crash_mode:
+            logger.warning("[CRASH-MODE] Entries blocked — BTC crash in progress")
+        else:
+            # Step 3: Detect dips and open on dip signals
+            dipping = self.detect_dips()
+            summary["dips_found"] = len(dipping)
+            if dipping:
+                opened = self.execute_signals(dipping)
+                summary["positions_opened"] = len(opened)
+
+            # Step 4: Fill any remaining empty slots (always invested)
+            filled = self.fill_empty_slots()
+            summary["slots_filled"] = len(filled)
 
         # Log summary
         stats = self.trader.get_stats()
