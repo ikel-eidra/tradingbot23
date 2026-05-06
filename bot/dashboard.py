@@ -43,7 +43,7 @@ class Dashboard:
         self._equity_lock = threading.Lock()
 
         self.root = tk.Tk()
-        self.root.title("TradingBot23")
+        self.root.title("TradingBot23 — FutolTech")
         self.root.geometry("940x720")
         self.root.minsize(800, 580)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -97,6 +97,9 @@ class Dashboard:
 
         self.clock_label = ttk.Label(top, text="", style="Header.TLabel", foreground="#8b949e")
         self.clock_label.pack(side="right")
+
+        ttk.Label(top, text="FutolTech  |  Futol Ethical Technology Ecosystems",
+                  style="Header.TLabel", foreground="#388bfd").pack(side="right", padx=(0, 15))
 
         # ── Control bar ──
         ctrl = tk.Frame(self.root, bg="#161b22", padx=15, pady=6)

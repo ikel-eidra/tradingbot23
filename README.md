@@ -18,7 +18,7 @@ TradingBot23 identifies the **top 5 biggest losers** among the top 50 coins by m
 
 ## Quick Start — Windows EXE (No Python needed)
 
-1. Download `TradingBot23.zip` from [Releases](https://github.com/ikel-eidra/tradingbot23/releases)
+1. Download `TradingBot23.exe` from [Releases](https://github.com/michaelfutol/tradingbot23/releases)
 2. Extract and open the `.env` file with Notepad
 3. Add your Binance API keys (read-only keys work for paper trading)
 4. Double-click `TradingBot23.exe`
