@@ -13,6 +13,7 @@ Key differences vs spot:
 """
 
 import csv
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -35,6 +36,10 @@ _CSV_HEADER = [
 
 def _history_csv():
     return config.DATA_DIR / "trade_history.csv"
+
+
+def _open_positions_json():
+    return config.DATA_DIR / "open_positions.json"
 
 
 def _append_trade_csv(row: dict) -> None:
@@ -99,6 +104,7 @@ class FuturesTrader:
         self.cash_balance = config.CAPITAL_USD  # Free margin
         self._client: BinanceClient | None = None
         self._load_trade_history()
+        self._load_open_positions()
 
         logger.info(
             "FuturesTrader initialized | Leverage: %dx | Fee: %.3f%% per side | "
@@ -291,6 +297,7 @@ class FuturesTrader:
             entry_change_24h=entry_change_24h,
         )
         self.positions.append(position)
+        self._save_open_positions()
 
         logger.info(
             "[PAPER-FUT] LONG %s %.6f @ $%.4f | Margin $%.2f | Notional $%.2f | "
@@ -357,6 +364,8 @@ class FuturesTrader:
                 closed.append(pos)
                 continue
 
+        if closed:
+            self._save_open_positions()
         return closed
 
     def _close(
@@ -469,6 +478,72 @@ class FuturesTrader:
                 "Loaded %d closed trades | Past P&L: $%+.2f | Restored balance: $%.2f",
                 loaded, past_pnl, self.cash_balance,
             )
+
+    def _save_open_positions(self) -> None:
+        """Persist open positions and current cash balance to disk."""
+        open_pos = [p for p in self.positions if p.status == FuturesPositionStatus.OPEN]
+        data = {
+            "cash_balance": self.cash_balance,
+            "positions": [
+                {
+                    "symbol":            p.symbol,
+                    "entry_price":       p.entry_price,
+                    "quantity":          p.quantity,
+                    "margin_used":       p.margin_used,
+                    "notional":          p.notional,
+                    "leverage":          p.leverage,
+                    "entry_time":        p.entry_time.isoformat(),
+                    "tp_price":          p.tp_price,
+                    "sl_price":          p.sl_price,
+                    "liquidation_price": p.liquidation_price,
+                    "amount_usd":        p.amount_usd,
+                    "entry_change_24h":  p.entry_change_24h,
+                    "breakeven_armed":   p.breakeven_armed,
+                }
+                for p in open_pos
+            ],
+        }
+        try:
+            with open(_open_positions_json(), "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            logger.exception("Failed to save open positions to disk")
+
+    def _load_open_positions(self) -> None:
+        """Restore open positions and exact cash balance from disk on startup."""
+        path = _open_positions_json()
+        if not path.exists():
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            restored = 0
+            for p in data.get("positions", []):
+                pos = FuturesPosition(
+                    symbol=p["symbol"],
+                    entry_price=p["entry_price"],
+                    quantity=p["quantity"],
+                    margin_used=p["margin_used"],
+                    notional=p["notional"],
+                    leverage=p["leverage"],
+                    entry_time=datetime.fromisoformat(p["entry_time"]),
+                    tp_price=p["tp_price"],
+                    sl_price=p["sl_price"],
+                    liquidation_price=p["liquidation_price"],
+                    amount_usd=p["amount_usd"],
+                    entry_change_24h=p["entry_change_24h"],
+                    breakeven_armed=p.get("breakeven_armed", False),
+                    status=FuturesPositionStatus.OPEN,
+                )
+                self.positions.append(pos)
+                restored += 1
+            self.cash_balance = data.get("cash_balance", self.cash_balance)
+            logger.info(
+                "Restored %d open positions from disk | Cash: $%.2f",
+                restored, self.cash_balance,
+            )
+        except Exception:
+            logger.exception("Failed to load open positions from disk")
 
     def get_open_positions(self) -> list[FuturesPosition]:
         return [p for p in self.positions if p.status == FuturesPositionStatus.OPEN]
