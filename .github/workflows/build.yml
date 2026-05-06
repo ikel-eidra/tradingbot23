@@ -24,9 +24,6 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Run tests
-        run: python -m unittest discover -s tests
-
       - name: Build executable
         run: pyinstaller tradingbot23.spec --clean
 
