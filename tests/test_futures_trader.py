@@ -6,10 +6,12 @@ from unittest.mock import patch
 
 from bot import config
 from bot.modules.futures_trader import FuturesPositionStatus, FuturesTrader
+from tests.support import isolate_data_dir
 
 
 class TestFuturesTrader(unittest.TestCase):
     def setUp(self):
+        isolate_data_dir(self)
         config.CAPITAL_USD = 10000
         config.PER_TRADE_PCT = 0.20
         config.LEVERAGE = 2
@@ -17,9 +19,11 @@ class TestFuturesTrader(unittest.TestCase):
         config.FUNDING_RATE_DAILY = 0.0003
         config.FUTURES_NET_TP_PCT = 0.005
         config.FUTURES_NET_SL_PCT = 0.0075
+        config.FUTURES_USE_SL = True
         config.MAX_HOLD_DAYS = 3
         config.BREAK_EVEN_TRIGGER_PCT = 0.005
         config.LOSS_COOLDOWN_HOURS = 24
+        config.TP_COOLDOWN_HOURS = 1
         self.trader = FuturesTrader()
 
     def test_leverage_clamp(self):
@@ -36,6 +40,14 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertGreater(pos.tp_price, 100)
         self.assertLess(pos.sl_price, 100)
         self.assertLess(pos.liquidation_price, pos.sl_price)
+
+    def test_open_caps_margin_to_include_entry_fee(self):
+        self.trader.cash_balance = 100
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            pos = self.trader.open_position("BTC", margin_usd=100)
+        self.assertIsNotNone(pos)
+        self.assertLess(pos.margin_used, 100)
+        self.assertGreaterEqual(self.trader.cash_balance, 0)
 
     def test_no_duplicate(self):
         with patch.object(self.trader, "get_current_price", return_value=100.0):

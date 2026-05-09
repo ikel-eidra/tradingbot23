@@ -33,7 +33,7 @@ The app has a full GUI with four tabs:
 
 | Tab | What you see |
 |---|---|
-| **Live** | Open positions with entry price, current price, P&L%, TP, liquidation price, age |
+| **Live** | Open positions with entry price, current price, per-trade leverage, P&L%, TP, liquidation price, age |
 | **Charts** | Equity curve, trade return distribution, exit breakdown pie, cumulative P&L |
 | **History** | Every trade ever made, loaded from disk — survives restarts |
 | **Settings** | Change leverage, TP%, SL on/off, capital, max hold days — applies instantly |

@@ -175,13 +175,15 @@ class Dashboard:
         pf = tk.Frame(parent, bg="#0d1117")
         pf.pack(fill="both", expand=True, padx=15)
 
-        pos_cols = ("symbol","amount","entry","current","pnl","trigger","tp","sl","age")
+        pos_cols = ("symbol","amount","lev","entry","current","pnl","trigger","tp","sl","age")
         self.pos_tree = ttk.Treeview(pf, columns=pos_cols, show="headings", height=5)
+        pnl_heading = "P&L % (leveraged)" if config.ENGINE == "futures" else "P&L %"
+        risk_heading = "LIQ" if config.ENGINE == "futures" else "SL"
         for col, heading, width in [
-            ("symbol","SYMBOL",70),("amount","AMOUNT $",85),
+            ("symbol","SYMBOL",70),("amount","AMOUNT $",85),("lev","LEV",45),
             ("entry","ENTRY",90),("current","CURRENT",90),
-            ("pnl","P&L %",70),("trigger","24H TRIGGER",90),
-            ("tp","TP",90),("sl","LIQ",90),("age","AGE",55),
+            ("pnl",pnl_heading,160),("trigger","24H TRIGGER",90),
+            ("tp","TP",90),("sl",risk_heading,90),("age","AGE",55),
         ]:
             self.pos_tree.heading(col, text=heading)
             self.pos_tree.column(col, width=width, anchor="center")
@@ -195,10 +197,10 @@ class Dashboard:
         cf = tk.Frame(parent, bg="#0d1117")
         cf.pack(fill="both", expand=True, padx=15, pady=(0, 8))
 
-        closed_cols = ("symbol","amount","entry","exit","pnl","pnl_usd","trigger","reason","time")
+        closed_cols = ("symbol","amount","lev","entry","exit","pnl","pnl_usd","trigger","reason","time")
         self.closed_tree = ttk.Treeview(cf, columns=closed_cols, show="headings", height=5)
         for col, heading, width in [
-            ("symbol","SYMBOL",65),("amount","AMOUNT $",80),
+            ("symbol","SYMBOL",65),("amount","AMOUNT $",80),("lev","LEV",45),
             ("entry","ENTRY",85),("exit","EXIT",85),
             ("pnl","P&L %",65),("pnl_usd","P&L $",75),
             ("trigger","24H TRIGGER",90),("reason","REASON",75),("time","CLOSED",95),
@@ -714,17 +716,30 @@ class Dashboard:
         for pos in open_positions:
             age_h   = (now - pos.entry_time).total_seconds() / 3600
             current = pos.last_known_price or pos.entry_price
-            pnl_str = (f"{((current-pos.entry_price)/pos.entry_price*100):+.2f}%"
-                       if current and pos.entry_price > 0 else "--")
+            leverage = getattr(pos, "leverage", 1)
+            if current and pos.entry_price > 0:
+                price_chg = (current - pos.entry_price) / pos.entry_price
+                lev_pnl   = price_chg * leverage * 100
+                if config.ENGINE == "futures":
+                    pnl_str = f"{lev_pnl:+.2f}% ({price_chg*100:+.2f}% price)"
+                else:
+                    pnl_str = f"{lev_pnl:+.2f}%"
+            else:
+                pnl_str = "--"
+            risk_price = getattr(pos, "liquidation_price", None)
+            if not risk_price:
+                risk_price = getattr(pos, "sl_price", None)
+            risk_str = f"${risk_price:.4f}" if risk_price else "--"
             self.pos_tree.insert("", "end", values=(
                 pos.symbol,
                 f"${pos.amount_usd:.2f}",
+                f"{leverage}x",
                 f"${pos.entry_price:.4f}",
                 f"${current:.4f}" if current else "--",
                 pnl_str,
                 f"{pos.entry_change_24h:+.2f}%",
                 f"${pos.tp_price:.4f}",
-                f"${pos.sl_price:.4f}",
+                risk_str,
                 f"{age_h:.1f}h",
             ))
 
@@ -738,9 +753,11 @@ class Dashboard:
             reason  = getattr(pos, "status", "--")
             if hasattr(reason, "value"):
                 reason = reason.value
+            leverage = getattr(pos, "leverage", 1)
             self.closed_tree.insert("", "end", values=(
                 pos.symbol,
                 f"${pos.amount_usd:.2f}",
+                f"{leverage}x",
                 f"${pos.entry_price:.4f}",
                 f"${pos.exit_price:.4f}" if pos.exit_price else "--",
                 f"{pos.pnl_pct:+.2f}%",

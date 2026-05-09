@@ -244,8 +244,9 @@ class FuturesTrader:
         portfolio_value = self.get_portfolio_value()
         margin_usd = margin_usd or (portfolio_value * config.PER_TRADE_PCT)
 
-        if margin_usd > self.cash_balance:
-            margin_usd = self.cash_balance
+        max_margin_with_entry_fee = self.cash_balance / (1 + self.leverage * config.FUTURES_FEE_PCT)
+        if margin_usd > max_margin_with_entry_fee:
+            margin_usd = max_margin_with_entry_fee
         if margin_usd < 10:
             logger.warning("Cash too low ($%.2f) — skipping %s", margin_usd, symbol)
             return None

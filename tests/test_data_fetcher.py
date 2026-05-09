@@ -1,7 +1,6 @@
-"""Tests for the CoinMarketCap data fetcher."""
+"""Tests for the CoinGecko data fetcher."""
 
 import unittest
-from unittest.mock import MagicMock, patch
 
 from bot.modules.data_fetcher import DataFetcher
 
@@ -10,7 +9,7 @@ class TestDataFetcher(unittest.TestCase):
     """Tests for DataFetcher."""
 
     def setUp(self):
-        self.fetcher = DataFetcher(api_key="test_key")
+        self.fetcher = DataFetcher()
 
     def test_get_top_losers_sorts_by_change(self):
         """Top losers should be sorted most negative first."""

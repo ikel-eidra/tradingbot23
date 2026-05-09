@@ -6,12 +6,14 @@ from unittest.mock import MagicMock, patch
 
 from bot import config
 from bot.modules.trader import PositionStatus, Trader
+from tests.support import isolate_data_dir
 
 
 class TestTrader(unittest.TestCase):
     """Tests for Trader (paper mode)."""
 
     def setUp(self):
+        isolate_data_dir(self)
         config.TRADING_MODE = "paper"
         config.CAPITAL_USD = 10000
         config.PER_TRADE_PCT = 0.20
@@ -23,6 +25,7 @@ class TestTrader(unittest.TestCase):
         config.MAX_HOLD_DAYS = 3
         config.BREAK_EVEN_TRIGGER_PCT = 0.005
         config.LOSS_COOLDOWN_HOURS = 24
+        config.TP_COOLDOWN_HOURS = 1
         self.trader = Trader()
 
     def test_portfolio_value_initial(self):
