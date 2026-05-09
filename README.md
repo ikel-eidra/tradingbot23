@@ -33,10 +33,10 @@ The app has a full GUI with four tabs:
 
 | Tab | What you see |
 |---|---|
-| **Live** | Open positions with entry price, current price, per-trade leverage, P&L%, TP, liquidation price, age |
+| **Live** | Open positions with entry price, current price, entry leverage, P&L%, TP, liquidation price, age |
 | **Charts** | Equity curve, trade return distribution, exit breakdown pie, cumulative P&L |
-| **History** | Every trade ever made, loaded from disk — survives restarts |
-| **Settings** | Change leverage, TP%, SL on/off, capital, max hold days — applies instantly |
+| **History** | Every trade ever made, loaded from disk, plus exportable performance reports |
+| **Settings** | Change leverage, TP%, SL on/off, capital, max hold days — applies to new trades instantly |
 
 ---
 
@@ -170,6 +170,7 @@ Every closed trade is appended to `data/trade_history.csv`. This file:
 - Is loaded on startup so stats (win rate, total P&L) are always correct
 - Can be opened in Excel for analysis
 - Is the data source for the History tab in the GUI
+- Can be summarized from the History tab with **Export Report**
 
 CSV columns: `open_time, close_time, symbol, engine, entry_price, exit_price, amount_usd, notional, leverage, pnl_pct, pnl_usd, funding_paid, reason, entry_change_24h`
 

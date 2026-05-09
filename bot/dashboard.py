@@ -89,10 +89,8 @@ class Dashboard:
                                     style="Mode.TLabel", foreground=mode_color)
         self.mode_label.pack(side="left")
 
-        engine_text = f"ENGINE: {config.ENGINE.upper()}"
-        if config.ENGINE == "futures":
-            engine_text += f" ({config.LEVERAGE}x)"
-        ttk.Label(top, text=f"   {engine_text}", style="Header.TLabel",
+        self.engine_var = tk.StringVar(value=self._new_trade_setting_text())
+        ttk.Label(top, textvariable=self.engine_var, style="Header.TLabel",
                   foreground="#8b949e").pack(side="left")
 
         self.clock_label = ttk.Label(top, text="", style="Header.TLabel", foreground="#8b949e")
@@ -180,7 +178,7 @@ class Dashboard:
         pnl_heading = "P&L % (leveraged)" if config.ENGINE == "futures" else "P&L %"
         risk_heading = "LIQ" if config.ENGINE == "futures" else "SL"
         for col, heading, width in [
-            ("symbol","SYMBOL",70),("amount","AMOUNT $",85),("lev","LEV",45),
+            ("symbol","SYMBOL",70),("amount","AMOUNT $",85),("lev","ENTRY LEV",70),
             ("entry","ENTRY",90),("current","CURRENT",90),
             ("pnl",pnl_heading,160),("trigger","24H TRIGGER",90),
             ("tp","TP",90),("sl",risk_heading,90),("age","AGE",55),
@@ -200,7 +198,7 @@ class Dashboard:
         closed_cols = ("symbol","amount","lev","entry","exit","pnl","pnl_usd","trigger","reason","time")
         self.closed_tree = ttk.Treeview(cf, columns=closed_cols, show="headings", height=5)
         for col, heading, width in [
-            ("symbol","SYMBOL",65),("amount","AMOUNT $",80),("lev","LEV",45),
+            ("symbol","SYMBOL",65),("amount","AMOUNT $",80),("lev","ENTRY LEV",70),
             ("entry","ENTRY",85),("exit","EXIT",85),
             ("pnl","P&L %",65),("pnl_usd","P&L $",75),
             ("trigger","24H TRIGGER",90),("reason","REASON",75),("time","CLOSED",95),
@@ -357,6 +355,8 @@ class Dashboard:
         ctrl.pack(fill="x", padx=15)
         ttk.Button(ctrl, text="Refresh", style="Btn.TButton",
                    command=self._refresh_history).pack(side="left")
+        ttk.Button(ctrl, text="Export Report", style="Btn.TButton",
+                   command=self._export_history_report).pack(side="left", padx=(6, 0))
         self._hist_summary_var = tk.StringVar(value="")
         ttk.Label(ctrl, textvariable=self._hist_summary_var, foreground="#8b949e",
                   background="#0d1117", font=("Consolas", 9)).pack(side="left", padx=12)
@@ -369,7 +369,7 @@ class Dashboard:
         for col, heading, width in [
             ("date","CLOSED",110),("symbol","SYMBOL",65),("engine","ENGINE",60),
             ("entry","ENTRY",85),("exit","EXIT",85),("amount","AMOUNT $",80),
-            ("lev","LEV",40),("pnl_pct","P&L %",65),("pnl_usd","P&L $",75),
+            ("lev","ENTRY LEV",70),("pnl_pct","P&L %",65),("pnl_usd","P&L $",75),
             ("reason","REASON",75),("trigger","24H TRIG",75),
         ]:
             self.hist_tree.heading(col, text=heading)
@@ -420,6 +420,71 @@ class Dashboard:
                 r.get("reason",""),
                 f"{float(r.get('entry_change_24h',0)):+.2f}%",
             ))
+
+    def _export_history_report(self):
+        path = _history_csv()
+        if not path.exists():
+            self._hist_summary_var.set("No trade history to export.")
+            return
+
+        with open(path, "r", encoding="utf-8") as f:
+            rows = list(_csv.DictReader(f))
+        if not rows:
+            self._hist_summary_var.set("No trade history to export.")
+            return
+
+        total = len(rows)
+        wins = [r for r in rows if self._num(r.get("pnl_pct")) > 0]
+        losses = [r for r in rows if self._num(r.get("pnl_pct")) <= 0]
+        total_pnl_usd = sum(self._num(r.get("pnl_usd")) for r in rows)
+        avg_pnl_pct = sum(self._num(r.get("pnl_pct")) for r in rows) / total
+        best = max(rows, key=lambda r: self._num(r.get("pnl_pct")))
+        worst = min(rows, key=lambda r: self._num(r.get("pnl_pct")))
+
+        by_engine = defaultdict(list)
+        by_reason = defaultdict(list)
+        by_leverage = defaultdict(list)
+        for row in rows:
+            by_engine[row.get("engine", "unknown")].append(row)
+            by_reason[row.get("reason", "unknown")].append(row)
+            by_leverage[row.get("leverage", "1")].append(row)
+
+        def section(title, groups):
+            lines = [title]
+            for key in sorted(groups):
+                group = groups[key]
+                group_wins = sum(1 for r in group if self._num(r.get("pnl_pct")) > 0)
+                group_pnl = sum(self._num(r.get("pnl_usd")) for r in group)
+                win_rate = group_wins / len(group) * 100 if group else 0
+                lines.append(
+                    f"  {key}: {len(group)} trades | win rate {win_rate:.1f}% | P&L ${group_pnl:+.2f}"
+                )
+            return "\n".join(lines)
+
+        generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        report = "\n\n".join([
+            "TradingBot23 Performance Report",
+            f"Generated: {generated}",
+            (
+                f"Trades: {total}\n"
+                f"Wins: {len(wins)} | Losses/breakeven: {len(losses)} | "
+                f"Win rate: {(len(wins) / total * 100):.1f}%\n"
+                f"Total P&L: ${total_pnl_usd:+.2f}\n"
+                f"Average P&L per trade: {avg_pnl_pct:+.2f}%\n"
+                f"Best trade: {best.get('symbol', '')} {self._num(best.get('pnl_pct')):+.2f}% "
+                f"(${self._num(best.get('pnl_usd')):+.2f})\n"
+                f"Worst trade: {worst.get('symbol', '')} {self._num(worst.get('pnl_pct')):+.2f}% "
+                f"(${self._num(worst.get('pnl_usd')):+.2f})"
+            ),
+            section("By Engine", by_engine),
+            section("By Entry Leverage", by_leverage),
+            section("By Exit Reason", by_reason),
+            "Note: This report summarizes local paper/live history from trade_history.csv.",
+        ])
+
+        out = config.DATA_DIR / f"performance_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        out.write_text(report, encoding="utf-8")
+        self._hist_summary_var.set(f"Report exported: {out.name}")
 
     # ── Settings tab ──────────────────────────────────────────────────────────
 
@@ -530,10 +595,25 @@ class Dashboard:
         config.MAX_HOLD_DAYS      = hold_days
         config.PER_TRADE_PCT      = per_trade
         self.trader.leverage      = leverage
+        self.engine_var.set(self._new_trade_setting_text())
 
         self._s_status.set(
             f"Applied!  Leverage: {leverage}x  |  TP: {tp_pct*100:.2f}%  |  "
             f"SL: {'ON' if sl_on else 'OFF'}  |  Hold: {hold_days}d")
+
+    @staticmethod
+    def _new_trade_setting_text() -> str:
+        text = f"   NEW TRADES: {config.ENGINE.upper()}"
+        if config.ENGINE == "futures":
+            text += f" {config.LEVERAGE}x"
+        return text
+
+    @staticmethod
+    def _num(value, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     @staticmethod
     def _write_env(updates: dict) -> None:
