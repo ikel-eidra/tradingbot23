@@ -627,12 +627,12 @@ class Dashboard:
                       font=("Consolas", 14, "bold")).pack(anchor="w")
 
         route_section = tk.Frame(body, bg="#0d1117")
-        route_section.pack(fill="both", expand=True, pady=(0, 8))
+        route_section.pack(fill="x", expand=False, pady=(0, 6))
         ttk.Label(route_section, text="ROUTE CALCULATOR", style="Header.TLabel",
                   background="#0d1117").pack(anchor="w", pady=(0, 3))
 
         route_cols = ("route", "size", "buy", "sell", "profit", "pct", "grade", "warnings")
-        self.p2p_route_tree = ttk.Treeview(route_section, columns=route_cols, show="headings", height=5)
+        self.p2p_route_tree = ttk.Treeview(route_section, columns=route_cols, show="headings", height=3)
         for col, heading, width in [
             ("route", "ROUTE", 115),
             ("size", "SIZE PHP", 95),
@@ -663,12 +663,12 @@ class Dashboard:
         self.p2p_buy_tree = self._build_p2p_table(
             buy_parent,
             "BUY USDT WITH PHP (LOWEST SELLER PRICES)",
-            height=5,
+            height=8,
         )
         self.p2p_sell_tree = self._build_p2p_table(
             sell_parent,
             "SELL USDT FOR PHP (HIGHEST BUYER PRICES)",
-            height=5,
+            height=8,
         )
 
         journal = tk.Frame(body, bg="#0d1117")
