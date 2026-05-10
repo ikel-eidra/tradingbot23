@@ -1,5 +1,6 @@
 """Tests for the paper-only Binance USDT-M Futures trader."""
 
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -52,6 +53,56 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertIsNotNone(pos)
         self.assertLess(pos.margin_used, 100)
         self.assertGreaterEqual(self.trader.cash_balance, 0)
+
+    def test_sync_starting_capital_adds_free_cash(self):
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            self.trader.open_position("BTC", margin_usd=1000)
+        cash_before = self.trader.cash_balance
+
+        applied = self.trader.sync_starting_capital(15000)
+
+        self.assertAlmostEqual(applied, 5000, places=2)
+        self.assertAlmostEqual(self.trader.cash_balance, cash_before + 5000, places=2)
+        self.assertAlmostEqual(self.trader.account_capital_usd, 15000)
+
+    def test_sync_starting_capital_infers_legacy_smaller_account(self):
+        config.CAPITAL_USD = 500
+        trader = FuturesTrader()
+        with patch.object(trader, "get_current_price", return_value=100.0):
+            trader.open_position("BTC", margin_usd=100)
+        config.CAPITAL_USD = 5000
+
+        applied = trader.sync_starting_capital(5000)
+
+        self.assertAlmostEqual(applied, 4500, places=2)
+        self.assertGreater(trader.cash_balance, 4800)
+        self.assertAlmostEqual(trader.account_capital_usd, 5000)
+
+    def test_load_open_positions_auto_syncs_legacy_capital(self):
+        config.CAPITAL_USD = 500
+        trader = FuturesTrader()
+        with patch.object(trader, "get_current_price", return_value=100.0):
+            trader.open_position("BTC", margin_usd=100)
+        path = config.DATA_DIR / "open_positions.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.pop("starting_capital_usd", None)
+        data.pop("total_contributed_capital", None)
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+        config.CAPITAL_USD = 5000
+        reloaded = FuturesTrader()
+
+        self.assertGreater(reloaded.cash_balance, 4800)
+        self.assertAlmostEqual(reloaded.account_capital_usd, 5000)
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        self.assertAlmostEqual(saved["starting_capital_usd"], 5000)
+
+    def test_sync_starting_capital_rejects_unavailable_withdrawal(self):
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            self.trader.open_position("BTC", margin_usd=9500)
+
+        with self.assertRaises(ValueError):
+            self.trader.sync_starting_capital(100)
 
     def test_monthly_contribution_applies_once_per_month(self):
         config.MONTHLY_CONTRIBUTION_USD = 100

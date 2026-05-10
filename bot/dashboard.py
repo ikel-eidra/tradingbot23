@@ -1202,6 +1202,9 @@ class Dashboard:
             self._s_status.set(f"Error: {e}")
             return
 
+        if capital <= 0:
+            self._s_status.set("Error: capital must be positive")
+            return
         leverage = max(1, min(leverage, config.MAX_LEVERAGE))
         self._s_leverage.set(leverage)
         if monthly_contribution < 0:
@@ -1209,6 +1212,17 @@ class Dashboard:
             return
         if not 1 <= monthly_day <= 31:
             self._s_status.set("Error: contribution day must be 1-31")
+            return
+        try:
+            capital_cash_delta = self.trader.starting_capital_delta(capital)
+            if self.trader.cash_balance + capital_cash_delta < -0.005:
+                self._s_status.set(
+                    f"Error: capital decrease needs ${abs(capital_cash_delta):,.2f} free cash; "
+                    f"available cash is ${self.trader.cash_balance:,.2f}."
+                )
+                return
+        except ValueError as e:
+            self._s_status.set(f"Error: {e}")
             return
 
         # Save to .env
@@ -1239,12 +1253,19 @@ class Dashboard:
         config.AUTO_START_FUTURES = auto_start
         config.SETTINGS_CONFIRMED = True
         self._settings_confirmed = True
+        applied_capital_delta = self.trader.sync_starting_capital(capital)
         self.trader.leverage      = leverage
         self.engine_var.set(self._new_trade_setting_text())
 
+        capital_note = ""
+        if abs(applied_capital_delta) >= 0.01:
+            sign = "+" if applied_capital_delta > 0 else "-"
+            capital_note = f"  |  Cash {sign}${abs(applied_capital_delta):,.2f}"
         self._s_status.set(
             f"Applied!  Leverage: {leverage}x  |  TP: {tp_pct*100:.2f}%  |  "
-            f"SL: {'ON' if sl_on else 'OFF'}  |  Add ${monthly_contribution:.2f}/mo")
+            f"SL: {'ON' if sl_on else 'OFF'}  |  Add ${monthly_contribution:.2f}/mo"
+            f"{capital_note}")
+        self._refresh_summary()
         self._update_contribution_schedule()
 
     @staticmethod

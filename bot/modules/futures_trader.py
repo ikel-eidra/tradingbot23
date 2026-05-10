@@ -103,6 +103,7 @@ class FuturesTrader:
                 config.LEVERAGE, config.MAX_LEVERAGE, config.MAX_LEVERAGE,
             )
         self.positions: list[FuturesPosition] = []
+        self.account_capital_usd: float | None = None
         self.cash_balance = config.CAPITAL_USD  # Free margin
         self._client: BinanceClient | None = None
         self._load_trade_history()
@@ -502,6 +503,56 @@ class FuturesTrader:
     def get_contributed_capital(self) -> float:
         return accounting.total_contributed_capital()
 
+    @staticmethod
+    def _entry_fee_for(pos: FuturesPosition) -> float:
+        return pos.notional * config.FUTURES_FEE_PCT
+
+    def infer_starting_capital(self) -> float:
+        """Infer pre-metadata starting capital from the paper account ledger."""
+        state = accounting.load_account_state()
+        monthly_contributions = float(state.get("total_contributed_usd", 0.0))
+        closed_pnl = sum(p.pnl_usd for p in self.get_trade_history())
+        entry_fees = sum(self._entry_fee_for(p) for p in self.positions)
+        open_margin = sum(p.margin_used for p in self.get_open_positions())
+        return self.cash_balance - monthly_contributions - closed_pnl + entry_fees + open_margin
+
+    def starting_capital_delta(self, new_capital: float) -> float:
+        new_capital = float(new_capital)
+        if new_capital <= 0:
+            raise ValueError("capital must be positive")
+        current_capital = (
+            self.account_capital_usd
+            if self.account_capital_usd is not None
+            else self.infer_starting_capital()
+        )
+        return new_capital - current_capital
+
+    def sync_starting_capital(self, new_capital: float) -> float:
+        """Apply a Settings capital change to the live paper cash balance.
+
+        Open positions keep their original margin/leverage. Increasing capital
+        behaves like a paper deposit into free cash; decreasing capital behaves
+        like a withdrawal and is rejected if free cash is insufficient.
+        """
+        new_capital = float(new_capital)
+        delta = self.starting_capital_delta(new_capital)
+        if abs(delta) < 0.01:
+            self.account_capital_usd = new_capital
+            self._save_open_positions()
+            return 0.0
+
+        if self.cash_balance + delta < -0.005:
+            raise ValueError(
+                f"capital decrease needs ${abs(delta):,.2f} free cash, "
+                f"but only ${self.cash_balance:,.2f} is available"
+            )
+
+        self.cash_balance += delta
+        self._normalize_cash_balance()
+        self.account_capital_usd = new_capital
+        self._save_open_positions()
+        return delta
+
     def arm_crash_sl(self) -> int:
         """Set emergency SL on all open positions at current_price × (1 - CRASH_SL_PCT).
 
@@ -539,6 +590,12 @@ class FuturesTrader:
         open_pos = [p for p in self.positions if p.status == FuturesPositionStatus.OPEN]
         data = {
             "cash_balance": self.cash_balance,
+            "starting_capital_usd": (
+                self.account_capital_usd
+                if self.account_capital_usd is not None
+                else config.CAPITAL_USD
+            ),
+            "total_contributed_capital": accounting.total_contributed_capital(),
             "positions": [
                 {
                     "symbol":            p.symbol,
@@ -573,6 +630,8 @@ class FuturesTrader:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if data.get("starting_capital_usd") is not None:
+                self.account_capital_usd = float(data["starting_capital_usd"])
             restored = 0
             for p in data.get("positions", []):
                 pos = FuturesPosition(
@@ -596,6 +655,18 @@ class FuturesTrader:
                 restored += 1
             self.cash_balance = data.get("cash_balance", self.cash_balance)
             self._normalize_cash_balance()
+            if self.account_capital_usd is None:
+                inferred_capital = self.infer_starting_capital()
+                self.account_capital_usd = inferred_capital
+                try:
+                    synced_delta = self.sync_starting_capital(config.CAPITAL_USD)
+                    if abs(synced_delta) >= 0.01:
+                        logger.info(
+                            "Synced legacy paper capital %.2f -> %.2f | Cash delta: %+.2f",
+                            inferred_capital, config.CAPITAL_USD, synced_delta,
+                        )
+                except ValueError as e:
+                    logger.warning("Could not auto-sync legacy paper capital: %s", e)
             logger.info(
                 "Restored %d open positions from disk | Cash: $%.2f",
                 restored, self.cash_balance,
