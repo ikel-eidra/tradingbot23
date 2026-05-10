@@ -78,6 +78,40 @@ class Dashboard:
         style.map("TNotebook.Tab",
                   background=[("selected", "#0d1117")],
                   foreground=[("selected", "#58a6ff")])
+        style.configure(
+            "Settings.TEntry",
+            fieldbackground="#f0f6fc",
+            foreground="#0d1117",
+            insertcolor="#0d1117",
+            bordercolor="#8b949e",
+            lightcolor="#f0f6fc",
+            darkcolor="#8b949e",
+        )
+        style.map(
+            "Settings.TEntry",
+            fieldbackground=[("disabled", "#30363d"), ("readonly", "#f0f6fc"), ("focus", "#ffffff")],
+            foreground=[("disabled", "#8b949e"), ("readonly", "#0d1117"), ("focus", "#0d1117")],
+        )
+        style.configure(
+            "Settings.TCombobox",
+            fieldbackground="#f0f6fc",
+            background="#f0f6fc",
+            foreground="#0d1117",
+            arrowcolor="#0d1117",
+            bordercolor="#8b949e",
+            selectbackground="#c9d1d9",
+            selectforeground="#0d1117",
+        )
+        style.map(
+            "Settings.TCombobox",
+            fieldbackground=[("readonly", "#f0f6fc"), ("focus", "#ffffff")],
+            foreground=[("readonly", "#0d1117"), ("focus", "#0d1117")],
+            background=[("readonly", "#f0f6fc"), ("focus", "#ffffff")],
+        )
+        self.root.option_add("*TCombobox*Listbox.background", "#f0f6fc")
+        self.root.option_add("*TCombobox*Listbox.foreground", "#0d1117")
+        self.root.option_add("*TCombobox*Listbox.selectBackground", "#58a6ff")
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#0d1117")
 
         # ── Top bar ──
         top = tk.Frame(self.root, bg="#0d1117", pady=8, padx=15)
@@ -519,7 +553,7 @@ class Dashboard:
         # Capital
         self._s_capital = tk.StringVar(value=str(int(config.CAPITAL_USD)))
         row("Capital (USD)", lambda p: ttk.Entry(p, textvariable=self._s_capital, width=10,
-            font=("Consolas",10)), 0)
+            font=("Consolas",10), style="Settings.TEntry"), 0)
 
         # Leverage
         self._s_leverage = tk.StringVar(value=f"{config.LEVERAGE}x")
@@ -530,12 +564,13 @@ class Dashboard:
             state="readonly",
             width=6,
             font=("Consolas", 10),
+            style="Settings.TCombobox",
         ), 1)
 
         # TP %
         self._s_tp = tk.StringVar(value=str(round(config.FUTURES_NET_TP_PCT * 100, 2)))
         row("TP target (% net)", lambda p: ttk.Entry(p, textvariable=self._s_tp, width=8,
-            font=("Consolas",10)), 2)
+            font=("Consolas",10), style="Settings.TEntry"), 2)
 
         # SL enable + %
         self._s_sl_enabled = tk.BooleanVar(value=config.FUTURES_USE_SL)
@@ -546,28 +581,30 @@ class Dashboard:
                   font=("Consolas", 9), width=22).grid(row=3, column=0, sticky="w", pady=4)
         ttk.Checkbutton(sl_frame, text="Enable", variable=self._s_sl_enabled).pack(side="left")
         ttk.Entry(sl_frame, textvariable=self._s_sl, width=8,
-                  font=("Consolas",10)).pack(side="left", padx=8)
+                  font=("Consolas",10), style="Settings.TEntry").pack(side="left", padx=8)
         ttk.Label(sl_frame, text="% net", foreground="#8b949e", background="#0d1117",
                   font=("Consolas",9)).pack(side="left")
 
         # Max hold days
         self._s_hold = tk.StringVar(value=str(config.MAX_HOLD_DAYS))
         row("Max hold (days)", lambda p: ttk.Entry(p, textvariable=self._s_hold, width=8,
-            font=("Consolas",10)), 4)
+            font=("Consolas",10), style="Settings.TEntry"), 4)
 
         # Per trade %
         self._s_per_trade = tk.StringVar(value=str(round(config.PER_TRADE_PCT * 100, 0)))
         row("Per trade (% of portfolio)", lambda p: ttk.Entry(p, textvariable=self._s_per_trade, width=8,
-            font=("Consolas",10)), 5)
+            font=("Consolas",10), style="Settings.TEntry"), 5)
 
         # Monthly contribution
         self._s_monthly_contribution = tk.StringVar(value=str(round(config.MONTHLY_CONTRIBUTION_USD, 2)))
         row("Monthly contribution ($)", lambda p: ttk.Entry(
-            p, textvariable=self._s_monthly_contribution, width=8, font=("Consolas",10)), 6)
+            p, textvariable=self._s_monthly_contribution, width=8,
+            font=("Consolas",10), style="Settings.TEntry"), 6)
 
         self._s_monthly_day = tk.StringVar(value=str(config.MONTHLY_CONTRIBUTION_DAY))
         row("Contribution day", lambda p: ttk.Entry(
-            p, textvariable=self._s_monthly_day, width=8, font=("Consolas",10)), 7)
+            p, textvariable=self._s_monthly_day, width=8,
+            font=("Consolas",10), style="Settings.TEntry"), 7)
 
         # Apply button
         self._s_status = tk.StringVar(value="")
