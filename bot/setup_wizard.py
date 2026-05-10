@@ -66,7 +66,7 @@ def run_gui_wizard() -> bool:
     completed = [False]
 
     root = tk.Tk()
-    root.title("TradingBot23 — FutolTech Setup")
+    root.title("TradingBot23 Setup")
     root.geometry("520x480")
     root.resizable(False, False)
 
@@ -82,7 +82,6 @@ def run_gui_wizard() -> bool:
     frame.pack(fill="both", expand=True)
 
     ttk.Label(frame, text="TradingBot23 Setup", font=("Helvetica", 16, "bold")).pack(pady=(0, 2))
-    ttk.Label(frame, text="Futol Ethical Technology Ecosystems", font=("Helvetica", 9, "italic")).pack(pady=(0, 10))
     ttk.Label(frame, text="Paste your API keys to start paper trading.").pack(pady=(0, 15))
 
     fields = {}
@@ -144,6 +143,9 @@ def run_gui_wizard() -> bool:
     btn_frame.pack(pady=10)
     ttk.Button(btn_frame, text="Save & Start Bot", command=on_save).pack(side="left", padx=5)
     ttk.Button(btn_frame, text="Quit", command=root.destroy).pack(side="left", padx=5)
+
+    ttk.Label(frame, text="FutolTech  |  Futol Ethical Technology Ecosystems",
+              font=("Helvetica", 8, "italic")).pack(side="bottom", pady=(10, 0))
 
     root.mainloop()
     return completed[0]

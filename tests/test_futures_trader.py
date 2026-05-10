@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from bot import config
+from bot.modules import accounting
 from bot.modules.futures_trader import FuturesPositionStatus, FuturesTrader
 from tests.support import isolate_data_dir
 
@@ -61,6 +62,30 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertEqual(self.trader.apply_monthly_contribution(may_first), 0)
         self.assertAlmostEqual(self.trader.cash_balance, 10100)
         self.assertAlmostEqual(self.trader.get_contributed_capital(), 10100)
+
+    def test_monthly_contribution_applies_after_due_day(self):
+        config.MONTHLY_CONTRIBUTION_USD = 100
+        config.MONTHLY_CONTRIBUTION_DAY = 1
+        may_tenth = datetime(2026, 5, 10, tzinfo=timezone.utc)
+
+        self.assertEqual(self.trader.apply_monthly_contribution(may_tenth), 100)
+        self.assertAlmostEqual(self.trader.cash_balance, 10100)
+
+    def test_contribution_schedule_marks_one_year(self):
+        config.MONTHLY_CONTRIBUTION_USD = 100
+        config.MONTHLY_CONTRIBUTION_DAY = 31
+        now = datetime(2026, 2, 28, tzinfo=timezone.utc)
+
+        self.assertEqual(self.trader.apply_monthly_contribution(now), 100)
+        rows = accounting.contribution_schedule(months=12, now=now)
+
+        self.assertEqual(len(rows), 12)
+        self.assertEqual(rows[0]["month"], "2026-02")
+        self.assertEqual(rows[0]["date"], "2026-02-28")
+        self.assertEqual(rows[0]["status"], "paid")
+        self.assertEqual(rows[1]["month"], "2026-03")
+        self.assertEqual(rows[1]["date"], "2026-03-31")
+        self.assertEqual(rows[1]["status"], "scheduled")
 
     def test_no_duplicate(self):
         with patch.object(self.trader, "get_current_price", return_value=100.0):

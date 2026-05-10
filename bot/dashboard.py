@@ -18,6 +18,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import csv as _csv
 
 from bot import config
+from bot.modules import accounting
 from bot.modules.futures_trader import _history_csv
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ class Dashboard:
         self._equity_lock = threading.Lock()
 
         self.root = tk.Tk()
-        self.root.title("TradingBot23 — FutolTech")
+        self.root.title("TradingBot23")
         self.root.geometry("940x720")
         self.root.minsize(800, 580)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -94,9 +95,6 @@ class Dashboard:
 
         self.clock_label = ttk.Label(top, text="", style="Header.TLabel", foreground="#8b949e")
         self.clock_label.pack(side="right")
-
-        ttk.Label(top, text="FutolTech  |  Futol Ethical Technology Ecosystems",
-                  style="Header.TLabel", foreground="#388bfd").pack(side="right", padx=(0, 15))
 
         # ── Control bar ──
         ctrl = tk.Frame(self.root, bg="#161b22", padx=15, pady=6)
@@ -156,12 +154,15 @@ class Dashboard:
         self._build_history_tab(history_tab)
         self._build_settings_tab(settings_tab)
 
-        # ── Basket bar ──
+        # ── Bottom bar ──
         basket_frame = tk.Frame(self.root, bg="#161b22", padx=15, pady=5)
         basket_frame.pack(fill="x", side="bottom")
         self.basket_var = tk.StringVar(value="Basket: loading...")
         ttk.Label(basket_frame, textvariable=self.basket_var, foreground="#8b949e",
-                  background="#161b22", font=("Consolas", 9)).pack(anchor="w")
+                  background="#161b22", font=("Consolas", 9)).pack(side="left", anchor="w")
+        ttk.Label(basket_frame, text="FutolTech  |  Futol Ethical Technology Ecosystems",
+                  foreground="#388bfd", background="#161b22",
+                  font=("Consolas", 8, "bold")).pack(side="right", anchor="e")
 
     def _build_open_tab(self, parent):
         # Open positions
@@ -496,13 +497,17 @@ class Dashboard:
     # ── Settings tab ──────────────────────────────────────────────────────────
 
     def _build_settings_tab(self, parent):
-        pad = {"padx": 15, "pady": 6}
+        body = tk.Frame(parent, bg="#0d1117", padx=15, pady=14)
+        body.pack(fill="both", expand=True)
 
-        ttk.Label(parent, text="TRADING PARAMETERS", style="Header.TLabel",
-                  background="#0d1117").pack(anchor="w", padx=15, pady=(14, 4))
+        settings_panel = tk.Frame(body, bg="#0d1117")
+        settings_panel.pack(side="left", fill="y", anchor="nw")
 
-        grid = tk.Frame(parent, bg="#0d1117")
-        grid.pack(fill="x", padx=15)
+        ttk.Label(settings_panel, text="TRADING PARAMETERS", style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(0, 4))
+
+        grid = tk.Frame(settings_panel, bg="#0d1117")
+        grid.pack(fill="x")
 
         def row(label, widget_factory, r):
             ttk.Label(grid, text=label, foreground="#8b949e", background="#0d1117",
@@ -564,17 +569,45 @@ class Dashboard:
 
         # Apply button
         self._s_status = tk.StringVar(value="")
-        bf = tk.Frame(parent, bg="#0d1117")
-        bf.pack(fill="x", padx=15, pady=12)
+        bf = tk.Frame(settings_panel, bg="#0d1117")
+        bf.pack(fill="x", pady=12)
         ttk.Button(bf, text="Apply Settings", style="Btn.TButton",
                    command=self._apply_settings).pack(side="left")
         ttk.Label(bf, textvariable=self._s_status, foreground="#3fb950",
                   background="#0d1117", font=("Consolas", 9)).pack(side="left", padx=12)
 
-        ttk.Label(parent,
+        ttk.Label(settings_panel,
                   text="Changes apply to new trades only. Open positions keep their original settings.",
                   foreground="#8b949e", background="#0d1117",
-                  font=("Consolas", 8)).pack(anchor="w", padx=15)
+                  font=("Consolas", 8)).pack(anchor="w")
+
+        schedule_panel = tk.Frame(body, bg="#0d1117")
+        schedule_panel.pack(side="left", fill="both", expand=True, padx=(28, 0), anchor="n")
+        ttk.Label(schedule_panel, text="12-MONTH CONTRIBUTION PLAN", style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(0, 4))
+
+        self._contrib_summary_var = tk.StringVar(value="")
+        ttk.Label(schedule_panel, textvariable=self._contrib_summary_var,
+                  foreground="#8b949e", background="#0d1117",
+                  font=("Consolas", 9)).pack(anchor="w", pady=(0, 6))
+
+        contrib_cols = ("month", "due", "amount", "status")
+        self.contrib_tree = ttk.Treeview(
+            schedule_panel, columns=contrib_cols, show="headings", height=12,
+        )
+        for col, heading, width in [
+            ("month", "MONTH", 80),
+            ("due", "DUE", 90),
+            ("amount", "AMOUNT", 80),
+            ("status", "STATUS", 90),
+        ]:
+            self.contrib_tree.heading(col, text=heading)
+            self.contrib_tree.column(col, width=width, anchor="center")
+        self.contrib_tree.tag_configure("paid", foreground="#3fb950")
+        self.contrib_tree.tag_configure("due", foreground="#e3b341")
+        self.contrib_tree.tag_configure("scheduled", foreground="#8b949e")
+        self.contrib_tree.pack(fill="x", anchor="n")
+        self._update_contribution_schedule()
 
     def _apply_settings(self):
         try:
@@ -628,6 +661,7 @@ class Dashboard:
         self._s_status.set(
             f"Applied!  Leverage: {leverage}x  |  TP: {tp_pct*100:.2f}%  |  "
             f"SL: {'ON' if sl_on else 'OFF'}  |  Add ${monthly_contribution:.2f}/mo")
+        self._update_contribution_schedule()
 
     @staticmethod
     def _new_trade_setting_text() -> str:
@@ -772,6 +806,7 @@ class Dashboard:
             self._update_positions()
             self._update_closed()
             self._update_basket()
+            self._update_contribution_schedule()
         except Exception:
             logger.debug("Dashboard refresh error", exc_info=True)
 
@@ -881,6 +916,39 @@ class Dashboard:
             self.basket_var.set(f"Basket{ms}: {', '.join(syms)}")
         else:
             self.basket_var.set("Basket: waiting for first cycle...")
+
+    def _update_contribution_schedule(self):
+        if not hasattr(self, "contrib_tree"):
+            return
+
+        for item in self.contrib_tree.get_children():
+            self.contrib_tree.delete(item)
+
+        rows = accounting.contribution_schedule(months=12)
+        paid_count = 0
+        due_count = 0
+        total_planned = 0.0
+        for row in rows:
+            status = row["status"]
+            amount = self._num(row["amount_usd"])
+            paid_count += 1 if status == "paid" else 0
+            due_count += 1 if status == "due" else 0
+            total_planned += amount
+            self.contrib_tree.insert("", "end", values=(
+                row["month"],
+                row["date"],
+                f"${amount:,.2f}",
+                status.upper(),
+            ), tags=(status,))
+
+        if rows:
+            amount = self._num(rows[0]["amount_usd"])
+            day = config.MONTHLY_CONTRIBUTION_DAY
+            self._contrib_summary_var.set(
+                f"${amount:,.2f}/month on day {day}  |  "
+                f"{paid_count}/12 paid  |  {due_count} due  |  "
+                f"12-mo plan ${total_planned:,.2f}"
+            )
 
     def _on_close(self):
         self._running = False

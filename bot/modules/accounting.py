@@ -1,7 +1,8 @@
 """Paper-account contribution tracking."""
 
+import calendar
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from bot import config
 
@@ -45,6 +46,48 @@ def total_contributed_capital() -> float:
     return config.CAPITAL_USD + float(state.get("total_contributed_usd", 0.0))
 
 
+def _scheduled_date(year: int, month: int, day: int) -> date:
+    last_day = calendar.monthrange(year, month)[1]
+    return date(year, month, min(max(day, 1), last_day))
+
+
+def _add_months(year: int, month: int, offset: int) -> tuple[int, int]:
+    absolute = (year * 12) + (month - 1) + offset
+    return absolute // 12, (absolute % 12) + 1
+
+
+def contribution_schedule(months: int = 12, now: datetime | None = None) -> list[dict]:
+    """Return the next N monthly paper-contribution markers."""
+    now = now or datetime.now(timezone.utc)
+    amount = float(getattr(config, "MONTHLY_CONTRIBUTION_USD", 0.0))
+    day = int(getattr(config, "MONTHLY_CONTRIBUTION_DAY", 1))
+    paid_months = {
+        c.get("month")
+        for c in load_account_state().get("contributions", [])
+        if c.get("month")
+    }
+
+    rows = []
+    today = now.date()
+    for offset in range(months):
+        year, month = _add_months(now.year, now.month, offset)
+        due = _scheduled_date(year, month, day)
+        month_key = f"{year:04d}-{month:02d}"
+        if month_key in paid_months:
+            status = "paid"
+        elif due <= today:
+            status = "due"
+        else:
+            status = "scheduled"
+        rows.append({
+            "month": month_key,
+            "date": due.isoformat(),
+            "amount_usd": amount,
+            "status": status,
+        })
+    return rows
+
+
 def apply_monthly_contribution(cash_balance: float, now: datetime | None = None) -> tuple[float, float]:
     """Add this month's paper contribution if it is due.
 
@@ -57,7 +100,7 @@ def apply_monthly_contribution(cash_balance: float, now: datetime | None = None)
 
     now = now or datetime.now(timezone.utc)
     day = int(getattr(config, "MONTHLY_CONTRIBUTION_DAY", 1))
-    if now.day != day:
+    if now.date() < _scheduled_date(now.year, now.month, day):
         return cash_balance, 0.0
 
     state = load_account_state()

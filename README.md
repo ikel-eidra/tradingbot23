@@ -36,7 +36,7 @@ The app has a full GUI with four tabs:
 | **Live** | Open positions with entry price, current price, entry leverage, P&L%, TP, liquidation price, age |
 | **Charts** | Equity curve, trade return distribution, exit breakdown pie, cumulative P&L |
 | **History** | Every trade ever made, loaded from disk, plus exportable performance reports |
-| **Settings** | Change leverage, TP%, SL on/off, capital, monthly contribution, max hold days — applies to new trades instantly |
+| **Settings** | Change leverage, TP%, SL on/off, capital, monthly contribution, max hold days, and view the next 12 contribution markers |
 
 ---
 
@@ -175,7 +175,7 @@ Every closed trade is appended to `data/trade_history.csv`. This file:
 
 CSV columns: `open_time, close_time, symbol, engine, entry_price, exit_price, amount_usd, notional, leverage, pnl_pct, pnl_usd, funding_paid, reason, entry_change_24h`
 
-Monthly paper contributions are tracked in `data/account_state.json` so restarts do not double-add the same month. Dashboard portfolio P&L uses total contributed capital, not only starting capital, so deposits are not counted as profit.
+Monthly paper contributions are tracked in `data/account_state.json` so restarts do not double-add the same month. The Settings tab shows a 12-month contribution schedule with paid/due/scheduled markers. Dashboard portfolio P&L uses total contributed capital, not only starting capital, so deposits are not counted as profit.
 
 ---
 
