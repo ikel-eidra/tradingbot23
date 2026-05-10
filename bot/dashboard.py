@@ -245,12 +245,12 @@ class Dashboard:
         pos_cols = ("symbol","amount","lev","entry","current","pnl","trigger","tp","sl","age")
         self.pos_tree = ttk.Treeview(pf, columns=pos_cols, show="headings", height=5)
         pnl_heading = "P&L % (leveraged)"
-        risk_heading = "LIQ"
+        risk_heading = "CROSS LIQ"
         for col, heading, width in [
             ("symbol","SYMBOL",70),("amount","AMOUNT $",85),("lev","ENTRY LEV",70),
             ("entry","ENTRY",90),("current","CURRENT",90),
             ("pnl",pnl_heading,160),("trigger","24H TRIGGER",90),
-            ("tp","TP",90),("sl",risk_heading,90),("age","AGE",55),
+            ("tp","TP",90),("sl",risk_heading,105),("age","AGE",55),
         ]:
             self.pos_tree.heading(col, text=heading)
             self.pos_tree.column(col, width=width, anchor="center")

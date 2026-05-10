@@ -34,7 +34,7 @@ The app has a full GUI with five tabs:
 
 | Tab | What you see |
 |---|---|
-| **Open** | Open positions with entry price, current price, entry leverage, P&L%, TP, liquidation price, age |
+| **Open** | Open positions with entry price, current price, entry leverage, P&L%, TP, cross-liquidation price, age |
 | **Charts** | Equity curve, trade return distribution, exit breakdown pie, cumulative P&L |
 | **History** | Every trade ever made, loaded from disk, plus exportable performance reports |
 | **P2P Arb** | USDT/PHP P2P cycle command center with route sizing, net profit estimate, route grade, warnings, and journal |
@@ -57,7 +57,7 @@ Top-50 coins by market cap (BTC, ETH, SOL, BNB, etc.) have strong institutional 
 | Entry signal | 24h change ≤ −2% **OR** slot empty | Scanned every 5 minutes |
 | Take profit | +1% NET (after all fees) | Gross price target auto-computed |
 | Stop loss | Disabled by default | At 1x leverage, top-50 coins rebound reliably |
-| Liquidation guard | Always active | Refuses trades where SL would breach liquidation price |
+| Liquidation guard | Always active | Uses cross-margin account equity so free cash backs every futures paper position |
 | Max hold | 3 days | Auto-close at market if TP not reached |
 | Position size | 20% of portfolio | Dynamic compounding — grows with your portfolio |
 | Engine | Futures 1x (default) | One-cycle paper entries/exits with futures fee and liquidation modeling |
@@ -242,7 +242,8 @@ The EXE appears in `dist/TradingBot23.exe`. Copy the entire `dist/` folder to sh
 |---|---|
 | Paper mode only | No real orders are placed; live futures execution is not implemented |
 | 1x leverage default | Lowest-risk futures setting with wide liquidation distance |
-| Liquidation guard | At any leverage, refuses new trades where the SL would breach the liquidation price |
+| Cross-margin liquidation | Free cash plus open-position equity backs all paper futures positions, so small 20x paper trades are not treated like isolated-margin positions |
+| Liquidation guard | At any leverage, refuses new trades where the SL would breach the cross-liquidation price |
 | One position per coin | Duplicate entries blocked at trader level |
 | Cash safety check | Position size capped at available cash |
 | Dynamic sizing | Losses reduce exposure automatically; gains increase it |
