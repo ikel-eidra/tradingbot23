@@ -28,6 +28,7 @@ from bot.modules.p2p_arbitrage import (
     P2PRouteSettings,
     build_depth_sweep,
     build_p2p_routes,
+    build_p2p_hold_entry,
 )
 from bot.modules.p2p_monitor import P2PMonitor, P2PSnapshot
 
@@ -576,6 +577,10 @@ class Dashboard:
                   background="#0d1117").pack(side="left")
         ttk.Button(top, text="Reset Paper", style="Btn.TButton",
                    command=self._reset_p2p_paper).pack(side="right", padx=(6, 0))
+        ttk.Button(top, text="Check Hold Sell", style="Btn.TButton",
+                   command=self._check_p2p_hold_sell).pack(side="right", padx=(6, 0))
+        ttk.Button(top, text="Buy Hold", style="Btn.TButton",
+                   command=self._paper_hold_buy_now).pack(side="right", padx=(6, 0))
         ttk.Button(top, text="Paper Cycle Now", style="Btn.TButton",
                    command=self._paper_cycle_now).pack(side="right", padx=(6, 0))
         ttk.Button(top, text="Log Top Route", style="Btn.TButton",
@@ -591,6 +596,7 @@ class Dashboard:
         self._p2p_transfer_fee_usdt = tk.StringVar(value="1.0")
         self._p2p_buffer_php = tk.StringVar(value="0")
         self._p2p_auto_paper = tk.BooleanVar(value=False)
+        self._p2p_auto_hold_sell = tk.BooleanVar(value=True)
 
         for label_text, var, width in [
             ("Capital PHP", self._p2p_capital_php, 10),
@@ -632,6 +638,17 @@ class Dashboard:
             activeforeground="#58a6ff",
             font=("Consolas", 9),
         ).pack(side="left", pady=(13, 0))
+        tk.Checkbutton(
+            controls,
+            text="Auto Hold Sell",
+            variable=self._p2p_auto_hold_sell,
+            bg="#0d1117",
+            fg="#c9d1d9",
+            selectcolor="#161b22",
+            activebackground="#0d1117",
+            activeforeground="#58a6ff",
+            font=("Consolas", 9),
+        ).pack(side="left", padx=(10, 0), pady=(13, 0))
 
         self._p2p_status_var = tk.StringVar(value="Open this tab or press Refresh to load prices.")
         ttk.Label(body, textvariable=self._p2p_status_var, foreground="#8b949e",
@@ -647,6 +664,8 @@ class Dashboard:
         self._p2p_sweep_profit_var = tk.StringVar(value="--")
         self._p2p_paper_balance_var = tk.StringVar(value="--")
         self._p2p_paper_cycles_var = tk.StringVar(value="--")
+        self._p2p_hold_usdt_var = tk.StringVar(value="--")
+        self._p2p_hold_pnl_var = tk.StringVar(value="--")
 
         for label_text, var in [
             ("BEST BUY USDT", self._p2p_buy_var),
@@ -655,10 +674,12 @@ class Dashboard:
             ("500K SWEEP", self._p2p_sweep_profit_var),
             ("PAPER BAL", self._p2p_paper_balance_var),
             ("CYCLES", self._p2p_paper_cycles_var),
+            ("HOLD USDT", self._p2p_hold_usdt_var),
+            ("HOLD P&L", self._p2p_hold_pnl_var),
         ]:
             card = tk.Frame(summary, bg="#161b22",
                             highlightbackground="#30363d", highlightthickness=1)
-            card.pack(side="left", padx=(0, 8), ipadx=12, ipady=6)
+            card.pack(side="left", padx=(0, 6), ipadx=8, ipady=6)
             ttk.Label(card, text=label_text, foreground="#8b949e", background="#161b22",
                       font=("Consolas", 8)).pack(anchor="w")
             ttk.Label(card, textvariable=var, foreground="#58a6ff", background="#161b22",
@@ -804,12 +825,12 @@ class Dashboard:
 
         self._fill_p2p_tree(self.p2p_buy_tree, snapshot.buy_ads)
         self._fill_p2p_tree(self.p2p_sell_tree, snapshot.sell_ads)
-        self._recalculate_p2p_routes(update_status=False)
 
         self._p2p_status_var.set(
             f"USDT/PHP updated {snapshot.as_of.strftime('%H:%M:%S')} UTC  |  "
             "Routes are estimates only; manual fiat verification is still required."
         )
+        self._recalculate_p2p_routes(update_status=False)
 
     def _recalculate_p2p_routes(self, update_status: bool = True):
         if not self._p2p_last_snapshot:
@@ -825,6 +846,7 @@ class Dashboard:
         self._p2p_sweep = build_depth_sweep([self._p2p_last_snapshot], settings=settings)
         self._fill_p2p_route_tree(self._p2p_routes)
         self._update_p2p_sweep_summary()
+        self._refresh_p2p_paper_summary()
 
         if self._p2p_routes:
             top = self._p2p_routes[0]
@@ -843,6 +865,8 @@ class Dashboard:
 
         if self._p2p_auto_paper.get():
             self._execute_p2p_paper_cycle(auto=True)
+        if self._p2p_auto_hold_sell.get():
+            self._evaluate_p2p_hold(auto=True)
 
     def _p2p_route_settings(self) -> P2PRouteSettings | None:
         try:
@@ -914,6 +938,97 @@ class Dashboard:
         self._recalculate_p2p_routes(update_status=False)
         self._execute_p2p_paper_cycle(auto=False)
 
+    def _paper_hold_buy_now(self):
+        if not self._p2p_last_snapshot:
+            self._refresh_p2p()
+            self._p2p_status_var.set("Loading prices first; press Buy Hold again after refresh.")
+            return
+        settings = self._p2p_route_settings()
+        if not settings:
+            return
+        state = self.p2p_paper.state(settings.capital_php)
+        if state.get("hold_position"):
+            self._p2p_status_var.set("Hold buy skipped: one P2P hold is already open.")
+            self._refresh_p2p_paper_summary(state)
+            return
+        cash_php = self._num(state.get("cash_php"), settings.capital_php)
+        if cash_php <= 0:
+            self._p2p_status_var.set("Hold buy skipped: no free PHP paper cash.")
+            return
+
+        hold_settings = P2PRouteSettings(
+            capital_php=min(settings.capital_php, cash_php),
+            min_profit_php=settings.min_profit_php,
+            min_profit_pct=settings.min_profit_pct,
+            min_completion_rate=settings.min_completion_rate,
+            min_orders=settings.min_orders,
+            cross_exchange_transfer_fee_usdt=settings.cross_exchange_transfer_fee_usdt,
+            local_buffer_php=settings.local_buffer_php,
+            allowed_methods=settings.allowed_methods,
+        )
+        entry = build_p2p_hold_entry([self._p2p_last_snapshot], settings=hold_settings)
+        if not entry:
+            self._p2p_status_var.set("Hold buy skipped: not enough buy-side depth.")
+            return
+        state, position = self.p2p_paper.open_hold(
+            entry,
+            target_profit_pct=settings.min_profit_pct,
+            starting_php=settings.capital_php,
+        )
+        self._refresh_p2p_paper_summary(state)
+        if position:
+            warnings = "; ".join(entry.warnings) if entry.warnings else "ok"
+            self._p2p_status_var.set(
+                f"Paper hold opened: {entry.buy_usdt:,.2f} USDT @ "
+                f"{entry.avg_buy_price:,.2f} | Target +{settings.min_profit_pct:.3f}% | {warnings}"
+            )
+        else:
+            self._p2p_status_var.set("Hold buy skipped: insufficient free cash or open hold exists.")
+
+    def _check_p2p_hold_sell(self):
+        if not self._p2p_last_snapshot:
+            self._refresh_p2p()
+            self._p2p_status_var.set("Loading prices first; press Check Hold Sell again after refresh.")
+            return
+        self._evaluate_p2p_hold(auto=False)
+
+    def _evaluate_p2p_hold(self, auto: bool):
+        if not self._p2p_last_snapshot:
+            return
+        settings = self._p2p_route_settings()
+        if not settings:
+            return
+        state = self.p2p_paper.state(settings.capital_php)
+        if not state.get("hold_position"):
+            if not auto:
+                self._p2p_status_var.set("No open P2P hold to evaluate.")
+            self._refresh_p2p_paper_summary(state)
+            return
+
+        state, evaluation = self.p2p_paper.evaluate_hold_exit(
+            [self._p2p_last_snapshot],
+            settings=settings,
+            starting_php=settings.capital_php,
+        )
+        self._refresh_p2p_paper_summary(state)
+        if not evaluation:
+            if not auto:
+                self._p2p_status_var.set("Hold sell check skipped: not enough sell-side depth.")
+            return
+        if evaluation.exit_ready:
+            source = "Auto hold" if auto else "Hold"
+            self._p2p_status_var.set(
+                f"{source} sold: {evaluation.profit_php:+,.0f} PHP "
+                f"({evaluation.profit_pct:+.3f}%) @ {evaluation.avg_sell_price:,.2f}"
+            )
+        elif not auto:
+            warnings = "; ".join(evaluation.warnings) if evaluation.warnings else "waiting"
+            self._p2p_status_var.set(
+                f"Hold not sold: {evaluation.profit_php:+,.0f} PHP "
+                f"({evaluation.profit_pct:+.3f}%) vs target "
+                f"+{evaluation.target_profit_pct:.3f}% | {warnings}"
+            )
+
     def _execute_p2p_paper_cycle(self, auto: bool):
         if not self._p2p_last_snapshot or not self._p2p_sweep:
             self._p2p_status_var.set("No depth sweep available for paper cycle.")
@@ -922,7 +1037,11 @@ class Dashboard:
         if not settings:
             return
         state = self.p2p_paper.state(settings.capital_php)
-        paper_capital = self._num(state.get("balance_php"), settings.capital_php)
+        paper_capital = self._num(state.get("cash_php", state.get("balance_php")), settings.capital_php)
+        if paper_capital <= 0:
+            if not auto:
+                self._p2p_status_var.set("Paper cycle skipped: no free PHP paper cash.")
+            return
         paper_settings = P2PRouteSettings(
             capital_php=paper_capital,
             min_profit_php=settings.min_profit_php,
@@ -970,10 +1089,26 @@ class Dashboard:
             starting_php = self._num(self._p2p_capital_php.get(), 500_000)
         state = state or self.p2p_paper.state(starting_php)
         balance = self._num(state.get("balance_php"), 0)
+        cash = self._num(state.get("cash_php"), balance)
         cycles = state.get("cycles", [])
+        hold_trades = state.get("hold_trades", [])
         realized = self._num(state.get("realized_profit_php"), 0)
+        hold = state.get("hold_position") or {}
         self._p2p_paper_balance_var.set(f"{balance:,.0f} PHP")
-        self._p2p_paper_cycles_var.set(f"{len(cycles)} ({realized:+,.0f})")
+        self._p2p_paper_cycles_var.set(f"{len(cycles) + len(hold_trades)} ({realized:+,.0f})")
+        if hold:
+            usdt = self._num(hold.get("usdt"), 0)
+            avg_buy = self._num(hold.get("avg_buy_price"), 0)
+            last_profit = hold.get("last_profit_php")
+            last_pct = hold.get("last_profit_pct")
+            self._p2p_hold_usdt_var.set(f"{usdt:,.2f}")
+            if last_profit is not None and last_pct is not None:
+                self._p2p_hold_pnl_var.set(f"{self._num(last_profit):+,.0f} ({self._num(last_pct):+.3f}%)")
+            else:
+                self._p2p_hold_pnl_var.set(f"@ {avg_buy:,.2f}")
+        else:
+            self._p2p_hold_usdt_var.set("--")
+            self._p2p_hold_pnl_var.set(f"Cash {cash:,.0f}")
 
     def _log_top_p2p_route(self):
         if not self._p2p_routes:
