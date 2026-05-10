@@ -4,7 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bot.modules.p2p_arbitrage import P2PJournal, P2PRouteSettings, build_p2p_routes
+from bot.modules.p2p_arbitrage import (
+    P2PJournal,
+    P2PPaperArb,
+    P2PRouteSettings,
+    build_depth_sweep,
+    build_p2p_routes,
+)
 from bot.modules.p2p_monitor import P2PAd, P2PSnapshot
 
 
@@ -111,6 +117,57 @@ class TestP2PArbitrage(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "PLANNED")
         self.assertEqual(rows[0]["route"], "Binance -> Binance")
         self.assertEqual(rows[0]["notes"], "test")
+
+    def test_depth_sweep_uses_multiple_ads_and_weighted_average(self):
+        snapshot = P2PSnapshot(
+            marketplace="Binance",
+            asset="USDT",
+            fiat="PHP",
+            buy_ads=[
+                p2p_ad("BUY", "Binance", 60.00, 1_000, 100_000, 5_000, "seller 1"),
+                p2p_ad("BUY", "Binance", 60.20, 1_000, 100_000, 5_000, "seller 2"),
+            ],
+            sell_ads=[
+                p2p_ad("SELL", "Binance", 60.60, 1_000, 80_000, 5_000, "buyer 1"),
+                p2p_ad("SELL", "Binance", 60.50, 1_000, 200_000, 5_000, "buyer 2"),
+            ],
+            as_of=None,
+        )
+
+        sweep = build_depth_sweep(
+            [snapshot],
+            P2PRouteSettings(capital_php=200_000, min_profit_pct=0.1),
+        )
+
+        self.assertIsNotNone(sweep)
+        self.assertEqual(len(sweep.buy_lots), 2)
+        self.assertGreaterEqual(len(sweep.sell_lots), 1)
+        self.assertAlmostEqual(sweep.size_php, 200_000)
+        self.assertGreater(sweep.avg_sell_price, sweep.avg_buy_price)
+        self.assertGreater(sweep.profit_php, 0)
+
+    def test_paper_arb_executes_profitable_sweep_and_persists_balance(self):
+        snapshot = P2PSnapshot(
+            marketplace="Binance",
+            asset="USDT",
+            fiat="PHP",
+            buy_ads=[p2p_ad("BUY", "Binance", 60.00, 1_000, 100_000, 5_000, "seller")],
+            sell_ads=[p2p_ad("SELL", "Binance", 60.30, 1_000, 100_000, 5_000, "buyer")],
+            as_of=None,
+        )
+        sweep = build_depth_sweep(
+            [snapshot],
+            P2PRouteSettings(capital_php=50_000, min_profit_pct=0.1),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paper = P2PPaperArb(path=Path(tmpdir) / "paper.json")
+            state, cycle = paper.execute_if_profitable(sweep, min_profit_pct=0.1, starting_php=500_000)
+            reloaded = paper.state()
+
+        self.assertIsNotNone(cycle)
+        self.assertGreater(state["balance_php"], 500_000)
+        self.assertEqual(len(reloaded["cycles"]), 1)
 
 
 if __name__ == "__main__":

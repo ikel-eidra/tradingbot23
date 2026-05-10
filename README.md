@@ -145,6 +145,7 @@ All settings live in `.env`. The Settings tab in the GUI lets you change most of
 | `FUTURES_USE_SL` | `false` | Enable hard stop-loss (disabled by default) |
 | `MAX_HOLD_DAYS` | `3` | Auto-close after N days |
 | `DIP_THRESHOLD_PCT` | `0.02` | Entry trigger: −2% 24h change |
+| `AUTO_START_FUTURES` | `false` | New installs open paused so futures paper trades do not auto-open until Resume is pressed |
 | `BREAK_EVEN_TRIGGER_PCT` | `0.005` | Slide SL to break-even after +0.5% move |
 | `LOSS_COOLDOWN_HOURS` | `24` | Hours to skip a coin after SL hit |
 | `TP_COOLDOWN_HOURS` | `1` | Hours to skip a coin after TP hit |
@@ -207,6 +208,8 @@ The **P2P Arb** tab is a read-only USDT/PHP cycle command center. It pulls Binan
 | Best Buy USDT | Lowest seller price to buy USDT with PHP |
 | Best Sell USDT | Highest buyer price to sell USDT for PHP |
 | Route Calculator | Pairs buy/sell ads, caps size by capital and ad limits, and estimates net PHP profit |
+| 500K Sweep | Simulates splitting a PHP amount across multiple real buy/sell listings with weighted average prices |
+| Paper Arb | Compounds a local paper PHP balance from profitable depth sweeps; stored in `data/p2p_paper_arb.json` |
 | Route Grade | A/B/C/WATCH/REVIEW label based on estimated return and counterparty filters |
 | Journal | Logs the top route to `data/p2p_cycle_journal.csv` for manual cycle tracking |
 | Tables | Top buy/sell ads with PHP limits, USDT available, payment methods, advertiser, finish rate, and order count |
