@@ -763,21 +763,25 @@ class Dashboard:
         cols = ("price", "limits", "available", "methods", "advertiser", "finish", "orders")
         tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=height)
         for col, heading, width in [
-            ("price", "PRICE PHP", 85),
-            ("limits", "LIMIT PHP", 145),
-            ("available", "AVAIL USDT", 95),
-            ("methods", "PAYMENT", 190),
-            ("advertiser", "ADVERTISER", 135),
-            ("finish", "FINISH", 70),
-            ("orders", "ORDERS", 70),
+            ("price", "PRICE PHP", 75),
+            ("limits", "LIMIT PHP", 125),
+            ("available", "AVAIL USDT", 90),
+            ("methods", "PAYMENT", 155),
+            ("advertiser", "ADVERTISER", 115),
+            ("finish", "FINISH", 60),
+            ("orders", "ORDERS", 60),
         ]:
             tree.heading(col, text=heading)
-            tree.column(col, width=width, anchor="center")
+            tree.column(col, width=width, minwidth=50, anchor="center", stretch=False)
 
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=vsb.set)
-        tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
         return tree
 
     def _refresh_p2p(self):
