@@ -34,21 +34,21 @@ BINANCE_API_KEY={data['binance_key']}
 BINANCE_API_SECRET={data['binance_secret']}
 
 TRADING_MODE=paper
-ENGINE={data['engine']}
+ENGINE=futures
 CAPITAL_USD={data['capital']}
 
-NET_TP_PCT=0.01
-NET_SL_PCT=0.015
-FEE_PCT=0.001
 MAX_HOLD_DAYS=3
 DIP_THRESHOLD_PCT=0.02
 PER_TRADE_PCT=0.20
 CHECK_INTERVAL_HOURS=1
 
-LEVERAGE=2
-FUTURES_NET_TP_PCT=0.005
-FUTURES_NET_SL_PCT=0.0075
+LEVERAGE=1
+FUTURES_NET_TP_PCT=0.01
+FUTURES_NET_SL_PCT=0.015
 FUTURES_DIP_THRESHOLD_PCT=0.005
+FUTURES_USE_SL=false
+MONTHLY_CONTRIBUTION_USD=0
+MONTHLY_CONTRIBUTION_DAY=1
 
 LOG_LEVEL=INFO
 """
@@ -66,7 +66,7 @@ def run_gui_wizard() -> bool:
     completed = [False]
 
     root = tk.Tk()
-    root.title("TradingBot23 — FutolTech Setup")
+    root.title("TradingBot23 Setup")
     root.geometry("520x480")
     root.resizable(False, False)
 
@@ -82,7 +82,6 @@ def run_gui_wizard() -> bool:
     frame.pack(fill="both", expand=True)
 
     ttk.Label(frame, text="TradingBot23 Setup", font=("Helvetica", 16, "bold")).pack(pady=(0, 2))
-    ttk.Label(frame, text="Futol Ethical Technology Ecosystems", font=("Helvetica", 9, "italic")).pack(pady=(0, 10))
     ttk.Label(frame, text="Paste your API keys to start paper trading.").pack(pady=(0, 15))
 
     fields = {}
@@ -101,13 +100,6 @@ def run_gui_wizard() -> bool:
     sep = ttk.Separator(frame, orient="horizontal")
     sep.pack(fill="x", pady=10)
 
-    engine_frame = ttk.Frame(frame)
-    engine_frame.pack(fill="x", pady=3)
-    ttk.Label(engine_frame, text="Engine:", width=22, anchor="w").pack(side="left")
-    engine_var = tk.StringVar(value="spot")
-    ttk.Radiobutton(engine_frame, text="Spot (simple)", variable=engine_var, value="spot").pack(side="left")
-    ttk.Radiobutton(engine_frame, text="Futures (2x leverage)", variable=engine_var, value="futures").pack(side="left", padx=(10, 0))
-
     cap_frame = ttk.Frame(frame)
     cap_frame.pack(fill="x", pady=3)
     ttk.Label(cap_frame, text="Paper capital (USD):", width=22, anchor="w").pack(side="left")
@@ -120,7 +112,7 @@ def run_gui_wizard() -> bool:
     info_text = (
         "Get your Binance API keys:\n"
         "  binance.com > Profile > API Management\n"
-        "  Enable: Read Info + Spot Trading (for live mode)"
+        "  Read-only keys are enough; this app is paper-only futures"
     )
     info_label = ttk.Label(frame, text=info_text, font=("Courier", 9), justify="left")
     info_label.pack(pady=(5, 10))
@@ -129,7 +121,6 @@ def run_gui_wizard() -> bool:
         data = {
             "binance_key": fields["binance_key"].get().strip(),
             "binance_secret": fields["binance_secret"].get().strip(),
-            "engine": engine_var.get(),
             "capital": cap_entry.get().strip() or "10000",
         }
 
@@ -153,6 +144,9 @@ def run_gui_wizard() -> bool:
     ttk.Button(btn_frame, text="Save & Start Bot", command=on_save).pack(side="left", padx=5)
     ttk.Button(btn_frame, text="Quit", command=root.destroy).pack(side="left", padx=5)
 
+    ttk.Label(frame, text="FutolTech  |  Futol Ethical Technology Ecosystems",
+              font=("Helvetica", 8, "italic")).pack(side="bottom", pady=(10, 0))
+
     root.mainloop()
     return completed[0]
 
@@ -170,14 +164,11 @@ def run_terminal_wizard() -> bool:
         print("Error: Both Binance keys are required.")
         return False
 
-    engine_choice = input("Engine — 1) Spot  2) Futures [1]: ").strip()
-    engine = "futures" if engine_choice == "2" else "spot"
     capital = input("Paper capital USD [10000]: ").strip() or "10000"
 
     _write_env({
         "binance_key": binance_key,
         "binance_secret": binance_secret,
-        "engine": engine,
         "capital": capital,
     })
 

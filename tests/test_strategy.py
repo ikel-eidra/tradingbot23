@@ -2,12 +2,49 @@
 
 import unittest
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
+from bot import config
 from bot.modules.strategy import Strategy
+from tests.support import isolate_data_dir
 
 
 class TestStrategy(unittest.TestCase):
     """Tests for Strategy."""
+
+    def setUp(self):
+        isolate_data_dir(self)
+        config.CAPITAL_USD = 10000
+        config.PER_TRADE_PCT = 0.20
+        config.LEVERAGE = 1
+        config.FUTURES_FEE_PCT = 0.0006
+        config.MONTHLY_CONTRIBUTION_USD = 0
+        config.TOP_N_LOSERS = 5
+
+    def test_execute_signals_respects_max_open_slots(self):
+        """Should not open more positions than the configured basket slots."""
+
+        class FakeTrader:
+            def __init__(self):
+                self.positions = [SimpleNamespace(symbol=f"HELD{i}") for i in range(4)]
+
+            def get_open_positions(self):
+                return list(self.positions)
+
+            def open_position(self, symbol, entry_price=None, entry_change_24h=0.0):
+                pos = SimpleNamespace(symbol=symbol)
+                self.positions.append(pos)
+                return pos
+
+        trader = FakeTrader()
+        strategy = Strategy(trader=trader)
+        opened = strategy.execute_signals([
+            {"symbol": "AAA", "current_price": 1.0, "change_24h": -3.0},
+            {"symbol": "BBB", "current_price": 1.0, "change_24h": -4.0},
+        ])
+
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(len(trader.get_open_positions()), config.TOP_N_LOSERS)
 
     def test_should_refresh_basket_when_empty(self):
         """Should refresh when basket is empty."""

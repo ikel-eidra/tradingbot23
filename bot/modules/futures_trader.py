@@ -1,11 +1,11 @@
 """Binance USDT-M Perpetual Futures trader (PAPER MODE ONLY).
 
-This module simulates leveraged perpetual futures trading using LIVE prices
+This module simulates leveraged perpetual futures trading using current prices
 from Binance, but executes no real orders. It is intentionally paper-only —
-to enable live futures trading you must explicitly extend this class with
+to enable real-money futures trading you must explicitly extend this class with
 proper risk controls (margin checks, isolated/cross mode, OCO, etc.).
 
-Key differences vs spot:
+Modeled futures mechanics:
 - Leverage amplifies both gains and losses
 - Funding rate is paid every 8h (modeled as a daily drag on PNL)
 - Liquidation can wipe a position if price moves against you by ~1/leverage
@@ -23,6 +23,7 @@ from binance.client import Client as BinanceClient
 from binance.exceptions import BinanceAPIException
 
 from bot import config
+from bot.modules import accounting
 from bot.modules import telegram_notifier as tg
 
 logger = logging.getLogger(__name__)
@@ -88,14 +89,14 @@ class FuturesPosition:
 
 
 class FuturesTrader:
-    """Paper-mode futures trader using live Binance prices."""
+    """Paper-mode futures trader using current Binance prices."""
 
     def __init__(self, api_key: str | None = None, api_secret: str | None = None):
         self.api_key = api_key or config.BINANCE_API_KEY
         self.api_secret = api_secret or config.BINANCE_API_SECRET
         # Force paper mode — there is no live futures execution path here.
         self.paper_mode = True
-        self.leverage = min(config.LEVERAGE, config.MAX_LEVERAGE)
+        self.leverage = max(1, min(config.LEVERAGE, config.MAX_LEVERAGE))
         if config.LEVERAGE > config.MAX_LEVERAGE:
             logger.warning(
                 "LEVERAGE %dx exceeds MAX_LEVERAGE %dx — clamped to %dx for safety",
@@ -134,13 +135,14 @@ class FuturesTrader:
         return f"{symbol}USDT"
 
     def get_current_price(self, symbol: str) -> float | None:
-        """Fetch current price from Binance USDT-M futures (or spot fallback)."""
+        """Fetch current price from Binance USDT-M futures."""
         pair = self._trading_pair(symbol)
         try:
             ticker = self.client.futures_symbol_ticker(symbol=pair)
             return float(ticker["price"])
         except BinanceAPIException:
             try:
+                # Price-data fallback only. The app still never opens exchange orders.
                 ticker = self.client.get_symbol_ticker(symbol=pair)
                 return float(ticker["price"])
             except BinanceAPIException as e:
@@ -199,6 +201,7 @@ class FuturesTrader:
         entry_price: float | None = None, entry_change_24h: float = 0.0,
     ) -> FuturesPosition | None:
         """Open a paper futures long with TP, SL, and liquidation tracking."""
+        self._normalize_cash_balance()
         for pos in self.positions:
             if pos.symbol == symbol and pos.status == FuturesPositionStatus.OPEN:
                 logger.warning("Already have open futures position for %s, skipping", symbol)
@@ -276,13 +279,14 @@ class FuturesTrader:
         if sl_price <= liq_price:
             logger.warning(
                 "%s: SL price $%.4f would breach liquidation $%.4f at %dx leverage. "
-                "Reduce leverage or tighten NET_SL_PCT.",
+                "Reduce leverage or tighten FUTURES_NET_SL_PCT.",
                 symbol, sl_price, liq_price, self.leverage,
             )
             return None
 
         self.cash_balance -= margin_usd
         self.cash_balance -= entry_fee
+        self._normalize_cash_balance()
 
         position = FuturesPosition(
             symbol=symbol,
@@ -399,6 +403,7 @@ class FuturesTrader:
         if reason == FuturesPositionStatus.LIQUIDATED:
             pos.pnl_pct = -100.0
             pos.pnl_usd = -pos.margin_used
+            self._normalize_cash_balance()
             logger.warning(
                 "[PAPER-FUT] 💀 LIQUIDATED %s @ $%.4f | Lost margin $%.2f | Cash: $%.2f",
                 pos.symbol, exit_price, pos.margin_used, self.cash_balance,
@@ -409,6 +414,7 @@ class FuturesTrader:
             return
 
         self.cash_balance += pos.margin_used + net_pnl_usd
+        self._normalize_cash_balance()
         logger.info(
             "[PAPER-FUT] CLOSE %s @ $%.4f | %s | NET PNL: %+.2f%% (%+$%.2f) | "
             "Fee $%.2f | Funding $%.2f | Cash: $%.2f",
@@ -443,6 +449,7 @@ class FuturesTrader:
     def _load_trade_history(self) -> None:
         path = _history_csv()
         if not path.exists():
+            self.cash_balance = accounting.total_contributed_capital()
             return
         loaded = 0
         with open(path, "r", encoding="utf-8") as f:
@@ -475,13 +482,25 @@ class FuturesTrader:
                     loaded += 1
                 except Exception:
                     logger.debug("Skipped unreadable history row", exc_info=True)
+        past_pnl = sum(p.pnl_usd for p in self.positions)
+        self.cash_balance = accounting.total_contributed_capital() + past_pnl
+        self._normalize_cash_balance()
         if loaded:
-            past_pnl = sum(p.pnl_usd for p in self.positions)
-            self.cash_balance = config.CAPITAL_USD + past_pnl
             logger.info(
                 "Loaded %d closed trades | Past P&L: $%+.2f | Restored balance: $%.2f",
                 loaded, past_pnl, self.cash_balance,
             )
+
+    def apply_monthly_contribution(self, now: datetime | None = None) -> float:
+        """Apply the configured monthly paper contribution once per month."""
+        self.cash_balance, amount = accounting.apply_monthly_contribution(self.cash_balance, now)
+        self._normalize_cash_balance()
+        if amount:
+            self._save_open_positions()
+        return amount
+
+    def get_contributed_capital(self) -> float:
+        return accounting.total_contributed_capital()
 
     def arm_crash_sl(self) -> int:
         """Set emergency SL on all open positions at current_price × (1 - CRASH_SL_PCT).
@@ -516,6 +535,7 @@ class FuturesTrader:
 
     def _save_open_positions(self) -> None:
         """Persist open positions and current cash balance to disk."""
+        self._normalize_cash_balance()
         open_pos = [p for p in self.positions if p.status == FuturesPositionStatus.OPEN]
         data = {
             "cash_balance": self.cash_balance,
@@ -575,12 +595,18 @@ class FuturesTrader:
                 self.positions.append(pos)
                 restored += 1
             self.cash_balance = data.get("cash_balance", self.cash_balance)
+            self._normalize_cash_balance()
             logger.info(
                 "Restored %d open positions from disk | Cash: $%.2f",
                 restored, self.cash_balance,
             )
         except Exception:
             logger.exception("Failed to load open positions from disk")
+
+    def _normalize_cash_balance(self) -> None:
+        """Avoid tiny floating-point cash dust showing as negative zero."""
+        if abs(self.cash_balance) < 0.01:
+            self.cash_balance = 0.0
 
     def get_open_positions(self) -> list[FuturesPosition]:
         return [p for p in self.positions if p.status == FuturesPositionStatus.OPEN]

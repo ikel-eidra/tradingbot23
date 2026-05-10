@@ -12,18 +12,22 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+dist_check/
 *.egg
 .eggs/
 venv/
 .venv/
+*.zip
 
 # Data & logs (local only)
 data/*.json
 data/*.csv
 data/*.txt
+data/backups/
 logs/*.log
 
 # IDE
+.claude/
 .vscode/
 .idea/
 *.swp
@@ -36,3 +40,6 @@ Thumbs.db
 
 # Docker
 .dockerignore
+
+# Local share/export folders
+TradingBot23_for_friend/

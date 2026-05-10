@@ -3,7 +3,7 @@
 When double-clicked:
   1. If no .env found -> shows setup wizard (GUI)
   2. Loads config from .env
-  3. Opens the live dashboard with paper trading running
+  3. Opens the dashboard with futures paper trading running
 """
 
 import sys
@@ -26,7 +26,6 @@ from bot import config
 from bot.modules.data_fetcher import DataFetcher
 from bot.modules.futures_trader import FuturesTrader
 from bot.modules.strategy import Strategy
-from bot.modules.trader import Trader
 
 log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 log_file = config.LOG_DIR / "bot_gui.log"
@@ -41,10 +40,7 @@ except ValueError as e:
     sys.exit(1)
 
 fetcher = DataFetcher()
-if config.ENGINE == "futures":
-    trader = FuturesTrader()
-else:
-    trader = Trader()
+trader = FuturesTrader()
 strategy = Strategy(fetcher=fetcher, trader=trader)
 
 from bot.dashboard import Dashboard

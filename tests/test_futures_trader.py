@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from bot import config
+from bot.modules import accounting
 from bot.modules.futures_trader import FuturesPositionStatus, FuturesTrader
 from tests.support import isolate_data_dir
 
@@ -24,12 +25,15 @@ class TestFuturesTrader(unittest.TestCase):
         config.BREAK_EVEN_TRIGGER_PCT = 0.005
         config.LOSS_COOLDOWN_HOURS = 24
         config.TP_COOLDOWN_HOURS = 1
+        config.MONTHLY_CONTRIBUTION_USD = 0
+        config.MONTHLY_CONTRIBUTION_DAY = 1
         self.trader = FuturesTrader()
 
     def test_leverage_clamp(self):
         config.LEVERAGE = 999
         t = FuturesTrader()
         self.assertEqual(t.leverage, config.MAX_LEVERAGE)
+        self.assertEqual(t.leverage, 20)
 
     def test_open_paper_long(self):
         with patch.object(self.trader, "get_current_price", return_value=100.0):
@@ -48,6 +52,41 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertIsNotNone(pos)
         self.assertLess(pos.margin_used, 100)
         self.assertGreaterEqual(self.trader.cash_balance, 0)
+
+    def test_monthly_contribution_applies_once_per_month(self):
+        config.MONTHLY_CONTRIBUTION_USD = 100
+        config.MONTHLY_CONTRIBUTION_DAY = 1
+        may_first = datetime(2026, 5, 1, tzinfo=timezone.utc)
+
+        self.assertEqual(self.trader.apply_monthly_contribution(may_first), 100)
+        self.assertAlmostEqual(self.trader.cash_balance, 10100)
+        self.assertEqual(self.trader.apply_monthly_contribution(may_first), 0)
+        self.assertAlmostEqual(self.trader.cash_balance, 10100)
+        self.assertAlmostEqual(self.trader.get_contributed_capital(), 10100)
+
+    def test_monthly_contribution_applies_after_due_day(self):
+        config.MONTHLY_CONTRIBUTION_USD = 100
+        config.MONTHLY_CONTRIBUTION_DAY = 1
+        may_tenth = datetime(2026, 5, 10, tzinfo=timezone.utc)
+
+        self.assertEqual(self.trader.apply_monthly_contribution(may_tenth), 100)
+        self.assertAlmostEqual(self.trader.cash_balance, 10100)
+
+    def test_contribution_schedule_marks_one_year(self):
+        config.MONTHLY_CONTRIBUTION_USD = 100
+        config.MONTHLY_CONTRIBUTION_DAY = 31
+        now = datetime(2026, 2, 28, tzinfo=timezone.utc)
+
+        self.assertEqual(self.trader.apply_monthly_contribution(now), 100)
+        rows = accounting.contribution_schedule(months=12, now=now)
+
+        self.assertEqual(len(rows), 12)
+        self.assertEqual(rows[0]["month"], "2026-02")
+        self.assertEqual(rows[0]["date"], "2026-02-28")
+        self.assertEqual(rows[0]["status"], "paid")
+        self.assertEqual(rows[1]["month"], "2026-03")
+        self.assertEqual(rows[1]["date"], "2026-03-31")
+        self.assertEqual(rows[1]["status"], "scheduled")
 
     def test_no_duplicate(self):
         with patch.object(self.trader, "get_current_price", return_value=100.0):

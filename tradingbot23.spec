@@ -15,8 +15,9 @@ a = Analysis(
         'bot.setup_wizard',
         'bot.modules',
         'bot.modules.data_fetcher',
-        'bot.modules.trader',
         'bot.modules.futures_trader',
+        'bot.modules.p2p_arbitrage',
+        'bot.modules.p2p_monitor',
         'bot.modules.strategy',
         'bot.modules.backtester',
         'binance',
@@ -48,5 +49,5 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,
-    icon=None,
+    icon='assets/tradingbot23.ico',
 )

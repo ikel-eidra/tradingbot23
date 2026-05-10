@@ -16,7 +16,9 @@ if getattr(sys, "frozen", False):
 else:
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-load_dotenv(PROJECT_ROOT / ".env")
+# The app must prefer the .env beside the EXE/project over machine-wide
+# variables so unrelated bots cannot hijack credentials such as Telegram tokens.
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 
 # --- API Keys ---
@@ -24,35 +26,15 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 
 # --- Trading Mode ---
-# "live" = real orders, "paper" = simulated, "backtest" = historical
+# "paper" = simulated futures trades, "backtest" = historical simulation.
+# Live order execution is intentionally not implemented.
 TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 
 # --- Capital & Position Sizing ---
 CAPITAL_USD = float(os.getenv("CAPITAL_USD", "10000"))
 PER_TRADE_PCT = float(os.getenv("PER_TRADE_PCT", "0.20"))  # 20% of current balance per coin
-
-# --- Strategy Parameters ---
-# NET take profit target (after fees). Default = 1% net profit per trade.
-NET_TP_PCT = float(os.getenv("NET_TP_PCT", "0.01"))
-# NET stop loss (after fees). Default = 1.5% net loss tolerance.
-NET_SL_PCT = float(os.getenv("NET_SL_PCT", "0.015"))
-# Binance spot trading fee per side (0.1% standard, 0.075% with BNB discount).
-FEE_PCT = float(os.getenv("FEE_PCT", "0.001"))
-
-# Gross TP must cover net target + fees on both sides (buy + sell).
-# Example: NET 1% + 0.1% buy fee + 0.1% sell fee = 1.2% gross TP.
-TP_PCT = NET_TP_PCT + (2 * FEE_PCT)
-# Gross SL: net loss tolerance MINUS the fee drag (you lose less in price
-# terms because fees already eat 0.2% on top).
-SL_PCT = max(NET_SL_PCT - (2 * FEE_PCT), 0.001)
-
-# Allow manual override of gross TP/SL via env var if user wants explicit control.
-_TP_OVERRIDE = os.getenv("TP_PCT")
-if _TP_OVERRIDE is not None:
-    TP_PCT = float(_TP_OVERRIDE)
-_SL_OVERRIDE = os.getenv("SL_PCT")
-if _SL_OVERRIDE is not None:
-    SL_PCT = float(_SL_OVERRIDE)
+MONTHLY_CONTRIBUTION_USD = float(os.getenv("MONTHLY_CONTRIBUTION_USD", "0"))
+MONTHLY_CONTRIBUTION_DAY = int(os.getenv("MONTHLY_CONTRIBUTION_DAY", "1"))
 
 MAX_HOLD_DAYS = int(os.getenv("MAX_HOLD_DAYS", "3"))  # Auto-close after 3 days
 DIP_THRESHOLD_PCT = float(os.getenv("DIP_THRESHOLD_PCT", "0.02"))  # -2% dip to enter
@@ -88,13 +70,13 @@ CHECK_INTERVAL_HOURS = float(os.getenv("CHECK_INTERVAL_HOURS", "1"))
 POSITION_CHECK_MINS = float(os.getenv("POSITION_CHECK_MINS", "5"))  # how often to check TP/SL
 
 # --- Engine selection ---
-# "spot"    = Binance spot trading (default, no leverage)
-# "futures" = Binance USDT-M Perpetual Futures (paper-only initially)
-ENGINE = os.getenv("ENGINE", "futures")
+# Futures-only. Spot trading is intentionally disabled; it needs two exchange
+# cycles to complete a turnabout, while this app focuses on futures paper flow.
+ENGINE = "futures"
 
-# --- Futures settings (only used when ENGINE=futures) ---
-LEVERAGE = int(os.getenv("LEVERAGE", "1"))  # 1x — same risk as spot, lower fees
-MAX_LEVERAGE = 5  # Hard cap for safety
+# --- Futures settings ---
+LEVERAGE = int(os.getenv("LEVERAGE", "1"))  # 1x default; paper cap below.
+MAX_LEVERAGE = 20  # Paper-only cap for stress testing leverage behavior.
 FUTURES_FEE_PCT = float(os.getenv("FUTURES_FEE_PCT", "0.0006"))  # 0.06% taker (Binance USDT-M)
 # Average daily funding cost as % of notional. Binance posts every 8h.
 # Historical average is ~0.01% per 8h = 0.03% per day. Conservative default.
@@ -106,7 +88,7 @@ FUTURES_NET_SL_PCT = float(os.getenv("FUTURES_NET_SL_PCT", "0.015"))  # 1.5% net
 # At 1x leverage, top-50 coins historically rebound — hold until TP or expiry, no SL.
 # Set to "true" only if you want hard stop-losses re-enabled.
 FUTURES_USE_SL = os.getenv("FUTURES_USE_SL", "false").lower() == "true"
-# 5-minute dip threshold for futures (smaller than spot's 24h threshold)
+# 5-minute dip threshold for optional short-window futures entry checks.
 FUTURES_DIP_THRESHOLD_PCT = float(os.getenv("FUTURES_DIP_THRESHOLD_PCT", "0.005"))  # -0.5% in 5m
 
 # --- Crash Detection ---
@@ -152,24 +134,21 @@ def validate():
 
     errors = []
     if TRADING_MODE == "live":
-        if not BINANCE_API_KEY:
-            errors.append("BINANCE_API_KEY is required for live trading")
-        if not BINANCE_API_SECRET:
-            errors.append("BINANCE_API_SECRET is required for live trading")
+        errors.append("Live trading is not implemented. Use TRADING_MODE=paper.")
     if errors:
         raise ValueError("Configuration errors:\n" + "\n".join(f"  - {e}" for e in errors))
 
     # --- Risk/reward sanity checks ---
     # Required win rate to break even: SL / (TP + SL)
-    if NET_TP_PCT > 0 and NET_SL_PCT > 0:
-        rr_ratio = NET_SL_PCT / NET_TP_PCT  # risk units per reward unit
-        breakeven_winrate = NET_SL_PCT / (NET_TP_PCT + NET_SL_PCT) * 100
+    if FUTURES_NET_TP_PCT > 0 and FUTURES_NET_SL_PCT > 0:
+        rr_ratio = FUTURES_NET_SL_PCT / FUTURES_NET_TP_PCT
+        breakeven_winrate = FUTURES_NET_SL_PCT / (FUTURES_NET_TP_PCT + FUTURES_NET_SL_PCT) * 100
 
         log.info(
             "Strategy parameters: NET TP %.3f%% / NET SL %.3f%% / "
-            "Gross TP %.3f%% / Gross SL %.3f%% / Fee %.3f%% per side",
-            NET_TP_PCT * 100, NET_SL_PCT * 100,
-            TP_PCT * 100, SL_PCT * 100, FEE_PCT * 100,
+            "Futures fee %.3f%% per side",
+            FUTURES_NET_TP_PCT * 100, FUTURES_NET_SL_PCT * 100,
+            FUTURES_FEE_PCT * 100,
         )
         log.info(
             "Risk:Reward = %.2f:1 | Required win rate to break even: %.1f%%",
@@ -179,21 +158,13 @@ def validate():
         if breakeven_winrate >= 90:
             log.warning(
                 "⚠️  EXTREME RISK: Break-even win rate is %.1f%%. "
-                "This is rarely sustainable in live markets. "
-                "Consider tightening SL or raising NET_TP_PCT.",
+                "This is rarely sustainable. "
+                "Consider tightening SL or raising FUTURES_NET_TP_PCT.",
                 breakeven_winrate,
             )
         elif breakeven_winrate >= 80:
             log.warning(
                 "⚠️  HIGH RISK: Break-even win rate is %.1f%%. "
-                "Backtest carefully before going live.",
+                "Backtest carefully before increasing capital.",
                 breakeven_winrate,
             )
-
-    # Warn if gross TP is smaller than the spread/fee buffer is realistic for
-    if TP_PCT < 2 * FEE_PCT:
-        log.warning(
-            "⚠️  Gross TP (%.3f%%) is smaller than round-trip fees (%.3f%%). "
-            "Profitable trades are mathematically impossible — adjust NET_TP_PCT.",
-            TP_PCT * 100, 2 * FEE_PCT * 100,
-        )

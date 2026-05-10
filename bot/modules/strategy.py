@@ -1,4 +1,4 @@
-"""Strategy engine for the Top 10 Losers mean-reversion bot.
+"""Strategy engine for the top losers mean-reversion bot.
 
 Orchestrates the monthly snapshot, daily dip detection, and trade
 signal generation.
@@ -10,23 +10,22 @@ from datetime import datetime, timezone
 from bot import config
 from bot.modules.data_fetcher import DataFetcher
 from bot.modules.futures_trader import FuturesTrader
-from bot.modules.trader import Trader
 from bot.modules import telegram_notifier as tg
 
 logger = logging.getLogger(__name__)
 
 
 class Strategy:
-    """Top 10 Losers mean-reversion strategy engine."""
+    """Top losers mean-reversion strategy engine."""
 
     def __init__(
         self,
         fetcher: DataFetcher | None = None,
-        trader: Trader | FuturesTrader | None = None,
+        trader: FuturesTrader | None = None,
     ):
         self.fetcher = fetcher or DataFetcher()
-        self.trader = trader or Trader()
-        self.is_futures = isinstance(self.trader, FuturesTrader)
+        self.trader = trader or FuturesTrader()
+        self.is_futures = True
         self.basket: list[dict] = []  # Current month's fixed coin basket
         self.basket_month: int | None = None  # Month the basket was set
         self.basket_year: int | None = None
@@ -44,7 +43,7 @@ class Strategy:
     def refresh_basket(self, now: datetime | None = None) -> list[dict]:
         """Take a new monthly snapshot of top losers.
 
-        Fetches top 50 coins by market cap, identifies the top 10 losers,
+        Fetches top coins by market cap, identifies the configured top losers,
         and locks the basket for the month.
         """
         now = now or datetime.now(timezone.utc)
@@ -83,8 +82,7 @@ class Strategy:
     def detect_dips(self) -> list[dict]:
         """Check current 24h change for basket coins using CoinGecko data.
 
-        Works for both spot and futures engines — the dip signal is always
-        based on 24h price change, not 5m data.
+        Futures entries use the 24h CoinGecko move for basket signals.
         """
         if not self.basket:
             logger.warning("No basket set — cannot detect dips")
@@ -180,22 +178,21 @@ class Strategy:
         for coin in dipping_coins:
             symbol = coin["symbol"]
 
-            # Skip if already have an open position
             open_positions = self.trader.get_open_positions()
+            if len(open_positions) >= config.TOP_N_LOSERS:
+                logger.debug("Skipping %s — max open position slots reached", symbol)
+                break
+
+            # Skip if already have an open position
             if any(p.symbol == symbol for p in open_positions):
                 logger.debug("Skipping %s — already have open position", symbol)
                 continue
 
             cg_price   = coin.get("current_price")
             change_24h = coin.get("change_24h", 0.0)
-            if self.is_futures:
-                position = self.trader.open_position(
-                    symbol, entry_price=cg_price, entry_change_24h=change_24h,
-                )
-            else:
-                position = self.trader.open_position(
-                    symbol, entry_price=cg_price, entry_change_24h=change_24h,
-                )
+            position = self.trader.open_position(
+                symbol, entry_price=cg_price, entry_change_24h=change_24h,
+            )
             if position:
                 opened.append(position)
 
@@ -294,11 +291,22 @@ class Strategy:
         summary = {
             "timestamp": now.isoformat(),
             "basket_refreshed": False,
+            "cash_contributed": 0.0,
             "dips_found": 0,
             "positions_opened": 0,
             "positions_closed": 0,
             "slots_filled": 0,
         }
+
+        if hasattr(self.trader, "apply_monthly_contribution"):
+            contributed = self.trader.apply_monthly_contribution(now)
+            summary["cash_contributed"] = contributed
+            if contributed:
+                logger.info(
+                    "Monthly paper contribution applied: $%.2f | Cash: $%.2f",
+                    contributed, self.trader.cash_balance,
+                )
+                tg.alert_contribution(contributed, self.trader.cash_balance, now.strftime("%Y-%m"))
 
         # Step 1: Check if we need a new basket
         if self.should_refresh_basket(now):

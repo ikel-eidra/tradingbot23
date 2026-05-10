@@ -1,6 +1,6 @@
 # TradingBot23
 
-**Automated crypto mean-reversion bot with a live GUI dashboard, persistent trade history, and Telegram alerts.**
+**Automated crypto futures mean-reversion bot with a paper trading GUI, persistent trade history, and Telegram alerts.**
 
 Runs on Windows as a standalone EXE — no Python, no coding required for end users.
 
@@ -13,6 +13,7 @@ TradingBot23 identifies the **top 5 biggest losers** among the top 50 coins by m
 **Data sources (100% free, no API key required):**
 - [CoinGecko](https://coingecko.com) — market cap rankings and 24h price changes
 - [Binance public API](https://binance.com) — real-time prices for TP/SL monitoring
+- Binance P2P public search — read-only USDT/PHP buy/sell ads for arbitrage monitoring
 
 ---
 
@@ -23,20 +24,21 @@ TradingBot23 identifies the **top 5 biggest losers** among the top 50 coins by m
 3. Add your Binance API keys (read-only keys work for paper trading)
 4. Double-click `TradingBot23.exe`
 
-The bot starts in **paper trading mode** — zero real money until you explicitly switch to live.
+The bot runs in **paper trading mode only**. It does not place real orders.
 
 ---
 
 ## Dashboard
 
-The app has a full GUI with four tabs:
+The app has a full GUI with five tabs:
 
 | Tab | What you see |
 |---|---|
-| **Live** | Open positions with entry price, current price, per-trade leverage, P&L%, TP, liquidation price, age |
+| **Open** | Open positions with entry price, current price, entry leverage, P&L%, TP, liquidation price, age |
 | **Charts** | Equity curve, trade return distribution, exit breakdown pie, cumulative P&L |
-| **History** | Every trade ever made, loaded from disk — survives restarts |
-| **Settings** | Change leverage, TP%, SL on/off, capital, max hold days — applies instantly |
+| **History** | Every trade ever made, loaded from disk, plus exportable performance reports |
+| **P2P Arb** | USDT/PHP P2P cycle command center with route sizing, net profit estimate, route grade, warnings, and journal |
+| **Settings** | Change leverage, TP%, SL on/off, capital, monthly contribution, max hold days, and view the next 12 contribution markers |
 
 ---
 
@@ -58,8 +60,8 @@ Top-50 coins by market cap (BTC, ETH, SOL, BNB, etc.) have strong institutional 
 | Liquidation guard | Always active | Refuses trades where SL would breach liquidation price |
 | Max hold | 3 days | Auto-close at market if TP not reached |
 | Position size | 20% of portfolio | Dynamic compounding — grows with your portfolio |
-| Engine | Futures 1x (default) | Lower fees (0.06% vs 0.1%), same risk as spot |
-| Leverage | 1x–5x (user configurable) | Hard cap at 5x for safety |
+| Engine | Futures 1x (default) | One-cycle paper entries/exits with futures fee and liquidation modeling |
+| Leverage | 1x–20x (paper configurable) | Higher settings are for paper stress testing only |
 
 ### Execution Flow
 
@@ -94,13 +96,14 @@ Top-50 coins by market cap (BTC, ETH, SOL, BNB, etc.) have strong institutional 
 tradingbot23/
 ├── bot/
 │   ├── config.py                  # All settings loaded from .env
-│   ├── dashboard.py               # Tkinter GUI — 4 tabs (Live, Charts, History, Settings)
+│   ├── dashboard.py               # Tkinter GUI — Open, Charts, History, P2P Arb, Settings
 │   ├── setup_wizard.py            # First-run GUI wizard
 │   ├── main.py                    # Entry point
 │   └── modules/
 │       ├── data_fetcher.py        # CoinGecko API — rankings, 24h changes, snapshots
 │       ├── futures_trader.py      # Paper futures engine with leverage, funding, liquidation
-│       ├── trader.py              # Paper/live spot engine with OCO orders
+│       ├── p2p_arbitrage.py       # P2P route sizing, scoring, and manual cycle journal
+│       ├── p2p_monitor.py         # Read-only Binance P2P USDT/PHP spread monitor
 │       ├── strategy.py            # Basket logic, dip detection, fill_empty_slots
 │       ├── telegram_notifier.py   # Trade alerts via Telegram bot
 │       └── backtester.py          # Historical simulation using Binance klines
@@ -123,13 +126,15 @@ All settings live in `.env`. The Settings tab in the GUI lets you change most of
 |---|---|---|
 | `BINANCE_API_KEY` | — | Binance API key (read-only for paper mode) |
 | `BINANCE_API_SECRET` | — | Binance API secret |
-| `TRADING_MODE` | `paper` | `paper` (safe default) or `live` |
-| `ENGINE` | `futures` | `futures` (recommended) or `spot` |
+| `TRADING_MODE` | `paper` | Futures are paper-only; no live execution path is implemented |
+| `ENGINE` | `futures` | Futures-only; spot trading is intentionally disabled |
 | `CAPITAL_USD` | `500` | Starting paper capital in USD |
-| `LEVERAGE` | `1` | 1x–5x. 1x = same risk as spot, just lower fees |
+| `LEVERAGE` | `1` | 1x–20x paper setting. 1x is the lowest-risk futures setting |
 | `TOP_N_COINS` | `50` | Market cap universe (top 50 recommended) |
 | `TOP_N_LOSERS` | `5` | Basket size (max simultaneous positions) |
 | `PER_TRADE_PCT` | `0.20` | 20% of portfolio per trade |
+| `MONTHLY_CONTRIBUTION_USD` | `0` | Paper cash added once per month; set `100` to simulate adding $100/month |
+| `MONTHLY_CONTRIBUTION_DAY` | `1` | Day of month to apply the paper contribution |
 
 ### Profit / Risk Settings
 
@@ -170,23 +175,43 @@ Every closed trade is appended to `data/trade_history.csv`. This file:
 - Is loaded on startup so stats (win rate, total P&L) are always correct
 - Can be opened in Excel for analysis
 - Is the data source for the History tab in the GUI
+- Can be summarized from the History tab with **Export Report**
 
 CSV columns: `open_time, close_time, symbol, engine, entry_price, exit_price, amount_usd, notional, leverage, pnl_pct, pnl_usd, funding_paid, reason, entry_change_24h`
 
+Monthly paper contributions are tracked in `data/account_state.json` so restarts do not double-add the same month. The Settings tab shows a 12-month contribution schedule with paid/due/scheduled markers. Dashboard portfolio P&L uses total contributed capital, not only starting capital, so deposits are not counted as profit.
+
 ---
 
-## Engines: Spot vs Futures
+## Futures Engine
 
-| | **Spot** | **Futures** (recommended) |
-|---|---|---|
-| Execution | Live or paper | Paper-only (safe) |
-| Leverage | 1x | 1x–5x (default 1x) |
-| Fees | 0.1% per side | 0.06% per side on notional |
-| Funding cost | None | ~0.03%/day (modeled) |
-| Liquidation | N/A | Tracked — refuses unsafe trades |
-| Real orders | Yes (live mode) | No — simulated only |
+TradingBot23 is futures-only by design. Spot support was removed because spot/OCO execution needs separate exchange cycles to complete a turnabout, while this app focuses on one-cycle futures-style paper entries and exits.
 
-> Futures mode is **paper-only by design**. Live perp execution requires margin controls that are intentionally not implemented here.
+| Control | Detail |
+|---|---|
+| Execution | Paper-only futures simulation |
+| Leverage | 1x–20x (default 1x, paper-only) |
+| Fees | 0.06% per side on notional |
+| Funding cost | ~0.03%/day modeled |
+| Liquidation | Tracked; unsafe entries are refused |
+| Real orders | Not implemented |
+
+---
+
+## P2P Cycle Command Center
+
+The **P2P Arb** tab is a read-only USDT/PHP cycle command center. It pulls Binance P2P ads once when opened, then refreshes every 60 seconds while the tab is selected.
+
+| Field | Detail |
+|---|---|
+| Best Buy USDT | Lowest seller price to buy USDT with PHP |
+| Best Sell USDT | Highest buyer price to sell USDT for PHP |
+| Route Calculator | Pairs buy/sell ads, caps size by capital and ad limits, and estimates net PHP profit |
+| Route Grade | A/B/C/WATCH/REVIEW label based on estimated return and counterparty filters |
+| Journal | Logs the top route to `data/p2p_cycle_journal.csv` for manual cycle tracking |
+| Tables | Top buy/sell ads with PHP limits, USDT available, payment methods, advertiser, finish rate, and order count |
+
+The route estimate is informational only. It does not place orders and it does not verify fiat payment receipt. Manual fiat verification is required before releasing crypto or treating any cycle as complete.
 
 ---
 
@@ -209,8 +234,8 @@ The EXE appears in `dist/TradingBot23.exe`. Copy the entire `dist/` folder to sh
 
 | Control | Detail |
 |---|---|
-| Paper mode default | No real orders until `TRADING_MODE=live` is explicitly set |
-| 1x leverage default | Same risk profile as spot trading, zero liquidation risk in practice |
+| Paper mode only | No real orders are placed; live futures execution is not implemented |
+| 1x leverage default | Lowest-risk futures setting with wide liquidation distance |
 | Liquidation guard | At any leverage, refuses new trades where the SL would breach the liquidation price |
 | One position per coin | Duplicate entries blocked at trader level |
 | Cash safety check | Position size capped at available cash |

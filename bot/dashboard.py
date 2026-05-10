@@ -18,13 +18,22 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import csv as _csv
 
 from bot import config
+from bot.modules import accounting
 from bot.modules.futures_trader import _history_csv
+from bot.modules.p2p_arbitrage import (
+    P2PJournal,
+    P2PRoute,
+    P2PRouteSettings,
+    build_p2p_routes,
+)
+from bot.modules.p2p_monitor import P2PMonitor, P2PSnapshot
 
 logger = logging.getLogger(__name__)
 
 
 class Dashboard:
     REFRESH_MS = 2000
+    P2P_REFRESH_SECS = 60
 
     def __init__(self, strategy):
         self.strategy = strategy
@@ -37,15 +46,21 @@ class Dashboard:
         self._last_cycle_time:    datetime | None = None
         self._last_cycle_summary: dict = {}
         self._next_cycle_ts:      float = 0.0
+        self.p2p_monitor = P2PMonitor(asset="USDT", fiat="PHP")
+        self.p2p_journal = P2PJournal()
+        self._p2p_refreshing = False
+        self._p2p_last_snapshot: P2PSnapshot | None = None
+        self._p2p_routes: list[P2PRoute] = []
+        self._p2p_next_refresh_ts = 0.0
 
         # Equity history: list of (datetime, portfolio_value)
         self._equity_history: list[tuple[datetime, float]] = []
         self._equity_lock = threading.Lock()
 
         self.root = tk.Tk()
-        self.root.title("TradingBot23 — FutolTech")
-        self.root.geometry("940x720")
-        self.root.minsize(800, 580)
+        self.root.title("TradingBot23")
+        self.root.geometry("1080x780")
+        self.root.minsize(980, 680)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_ui()
@@ -77,29 +92,57 @@ class Dashboard:
         style.map("TNotebook.Tab",
                   background=[("selected", "#0d1117")],
                   foreground=[("selected", "#58a6ff")])
+        style.configure(
+            "Settings.TEntry",
+            fieldbackground="#f0f6fc",
+            foreground="#0d1117",
+            insertcolor="#0d1117",
+            bordercolor="#8b949e",
+            lightcolor="#f0f6fc",
+            darkcolor="#8b949e",
+        )
+        style.map(
+            "Settings.TEntry",
+            fieldbackground=[("disabled", "#30363d"), ("readonly", "#f0f6fc"), ("focus", "#ffffff")],
+            foreground=[("disabled", "#8b949e"), ("readonly", "#0d1117"), ("focus", "#0d1117")],
+        )
+        style.configure(
+            "Settings.TCombobox",
+            fieldbackground="#f0f6fc",
+            background="#f0f6fc",
+            foreground="#0d1117",
+            arrowcolor="#0d1117",
+            bordercolor="#8b949e",
+            selectbackground="#c9d1d9",
+            selectforeground="#0d1117",
+        )
+        style.map(
+            "Settings.TCombobox",
+            fieldbackground=[("readonly", "#f0f6fc"), ("focus", "#ffffff")],
+            foreground=[("readonly", "#0d1117"), ("focus", "#0d1117")],
+            background=[("readonly", "#f0f6fc"), ("focus", "#ffffff")],
+        )
+        self.root.option_add("*TCombobox*Listbox.background", "#f0f6fc")
+        self.root.option_add("*TCombobox*Listbox.foreground", "#0d1117")
+        self.root.option_add("*TCombobox*Listbox.selectBackground", "#58a6ff")
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#0d1117")
 
         # ── Top bar ──
         top = tk.Frame(self.root, bg="#0d1117", pady=8, padx=15)
         top.pack(fill="x")
 
-        is_paper   = config.TRADING_MODE != "live"
-        mode_text  = "PAPER TRADING" if is_paper else "LIVE TRADING"
-        mode_color = "#3fb950" if is_paper else "#f85149"
+        mode_text  = "FUTURES PAPER"
+        mode_color = "#3fb950"
         self.mode_label = ttk.Label(top, text=f"  {mode_text}  ",
                                     style="Mode.TLabel", foreground=mode_color)
         self.mode_label.pack(side="left")
 
-        engine_text = f"ENGINE: {config.ENGINE.upper()}"
-        if config.ENGINE == "futures":
-            engine_text += f" ({config.LEVERAGE}x)"
-        ttk.Label(top, text=f"   {engine_text}", style="Header.TLabel",
+        self.engine_var = tk.StringVar(value=self._new_trade_setting_text())
+        ttk.Label(top, textvariable=self.engine_var, style="Header.TLabel",
                   foreground="#8b949e").pack(side="left")
 
         self.clock_label = ttk.Label(top, text="", style="Header.TLabel", foreground="#8b949e")
         self.clock_label.pack(side="right")
-
-        ttk.Label(top, text="FutolTech  |  Futol Ethical Technology Ecosystems",
-                  style="Header.TLabel", foreground="#388bfd").pack(side="right", padx=(0, 15))
 
         # ── Control bar ──
         ctrl = tk.Frame(self.root, bg="#161b22", padx=15, pady=6)
@@ -140,33 +183,40 @@ class Dashboard:
                       font=("Consolas", 8)).pack(anchor="w")
             ttk.Label(card, textvariable=var, style=sty, background="#161b22").pack(anchor="w")
 
-        # ── Notebook (Live | Charts | History | Settings) ──
+        # ── Notebook ──
         nb = ttk.Notebook(self.root)
+        self.notebook = nb
         nb.pack(fill="both", expand=True, padx=0, pady=0)
 
-        live_tab     = tk.Frame(nb, bg="#0d1117")
+        open_tab     = tk.Frame(nb, bg="#0d1117")
         charts_tab   = tk.Frame(nb, bg="#0d1117")
         history_tab  = tk.Frame(nb, bg="#0d1117")
+        p2p_tab      = tk.Frame(nb, bg="#0d1117")
         settings_tab = tk.Frame(nb, bg="#0d1117")
-        nb.add(live_tab,     text="  Live  ")
+        nb.add(open_tab,     text="  Open  ")
         nb.add(charts_tab,   text="  Charts  ")
         nb.add(history_tab,  text="  History  ")
+        nb.add(p2p_tab,      text="  P2P Arb  ")
         nb.add(settings_tab, text="  Settings  ")
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
-        self._build_live_tab(live_tab)
+        self._build_open_tab(open_tab)
         self._build_charts_tab(charts_tab)
         self._build_history_tab(history_tab)
+        self._build_p2p_tab(p2p_tab)
         self._build_settings_tab(settings_tab)
 
-        # ── Basket bar ──
+        # ── Bottom bar ──
         basket_frame = tk.Frame(self.root, bg="#161b22", padx=15, pady=5)
         basket_frame.pack(fill="x", side="bottom")
         self.basket_var = tk.StringVar(value="Basket: loading...")
         ttk.Label(basket_frame, textvariable=self.basket_var, foreground="#8b949e",
-                  background="#161b22", font=("Consolas", 9)).pack(anchor="w")
+                  background="#161b22", font=("Consolas", 9)).pack(side="left", anchor="w")
+        ttk.Label(basket_frame, text="FutolTech  |  Futol Ethical Technology Ecosystems",
+                  foreground="#388bfd", background="#161b22",
+                  font=("Consolas", 8, "bold")).pack(side="right", anchor="e")
 
-    def _build_live_tab(self, parent):
+    def _build_open_tab(self, parent):
         # Open positions
         pl = tk.Frame(parent, bg="#0d1117")
         pl.pack(fill="x", padx=15, pady=(10, 2))
@@ -177,10 +227,10 @@ class Dashboard:
 
         pos_cols = ("symbol","amount","lev","entry","current","pnl","trigger","tp","sl","age")
         self.pos_tree = ttk.Treeview(pf, columns=pos_cols, show="headings", height=5)
-        pnl_heading = "P&L % (leveraged)" if config.ENGINE == "futures" else "P&L %"
-        risk_heading = "LIQ" if config.ENGINE == "futures" else "SL"
+        pnl_heading = "P&L % (leveraged)"
+        risk_heading = "LIQ"
         for col, heading, width in [
-            ("symbol","SYMBOL",70),("amount","AMOUNT $",85),("lev","LEV",45),
+            ("symbol","SYMBOL",70),("amount","AMOUNT $",85),("lev","ENTRY LEV",70),
             ("entry","ENTRY",90),("current","CURRENT",90),
             ("pnl",pnl_heading,160),("trigger","24H TRIGGER",90),
             ("tp","TP",90),("sl",risk_heading,90),("age","AGE",55),
@@ -200,7 +250,7 @@ class Dashboard:
         closed_cols = ("symbol","amount","lev","entry","exit","pnl","pnl_usd","trigger","reason","time")
         self.closed_tree = ttk.Treeview(cf, columns=closed_cols, show="headings", height=5)
         for col, heading, width in [
-            ("symbol","SYMBOL",65),("amount","AMOUNT $",80),("lev","LEV",45),
+            ("symbol","SYMBOL",65),("amount","AMOUNT $",80),("lev","ENTRY LEV",70),
             ("entry","ENTRY",85),("exit","EXIT",85),
             ("pnl","P&L %",65),("pnl_usd","P&L $",75),
             ("trigger","24H TRIGGER",90),("reason","REASON",75),("time","CLOSED",95),
@@ -357,6 +407,8 @@ class Dashboard:
         ctrl.pack(fill="x", padx=15)
         ttk.Button(ctrl, text="Refresh", style="Btn.TButton",
                    command=self._refresh_history).pack(side="left")
+        ttk.Button(ctrl, text="Export Report", style="Btn.TButton",
+                   command=self._export_history_report).pack(side="left", padx=(6, 0))
         self._hist_summary_var = tk.StringVar(value="")
         ttk.Label(ctrl, textvariable=self._hist_summary_var, foreground="#8b949e",
                   background="#0d1117", font=("Consolas", 9)).pack(side="left", padx=12)
@@ -369,7 +421,7 @@ class Dashboard:
         for col, heading, width in [
             ("date","CLOSED",110),("symbol","SYMBOL",65),("engine","ENGINE",60),
             ("entry","ENTRY",85),("exit","EXIT",85),("amount","AMOUNT $",80),
-            ("lev","LEV",40),("pnl_pct","P&L %",65),("pnl_usd","P&L $",75),
+            ("lev","ENTRY LEV",70),("pnl_pct","P&L %",65),("pnl_usd","P&L $",75),
             ("reason","REASON",75),("trigger","24H TRIG",75),
         ]:
             self.hist_tree.heading(col, text=heading)
@@ -421,16 +473,465 @@ class Dashboard:
                 f"{float(r.get('entry_change_24h',0)):+.2f}%",
             ))
 
+    def _export_history_report(self):
+        path = _history_csv()
+        if not path.exists():
+            self._hist_summary_var.set("No trade history to export.")
+            return
+
+        with open(path, "r", encoding="utf-8") as f:
+            rows = list(_csv.DictReader(f))
+        if not rows:
+            self._hist_summary_var.set("No trade history to export.")
+            return
+
+        total = len(rows)
+        wins = [r for r in rows if self._num(r.get("pnl_pct")) > 0]
+        losses = [r for r in rows if self._num(r.get("pnl_pct")) <= 0]
+        total_pnl_usd = sum(self._num(r.get("pnl_usd")) for r in rows)
+        avg_pnl_pct = sum(self._num(r.get("pnl_pct")) for r in rows) / total
+        best = max(rows, key=lambda r: self._num(r.get("pnl_pct")))
+        worst = min(rows, key=lambda r: self._num(r.get("pnl_pct")))
+        contributed_capital = (
+            self.trader.get_contributed_capital()
+            if hasattr(self.trader, "get_contributed_capital")
+            else config.CAPITAL_USD
+        )
+        portfolio = self.trader.get_portfolio_value()
+
+        by_engine = defaultdict(list)
+        by_reason = defaultdict(list)
+        by_leverage = defaultdict(list)
+        for row in rows:
+            by_engine[row.get("engine", "unknown")].append(row)
+            by_reason[row.get("reason", "unknown")].append(row)
+            by_leverage[row.get("leverage", "1")].append(row)
+
+        def section(title, groups):
+            lines = [title]
+            for key in sorted(groups):
+                group = groups[key]
+                group_wins = sum(1 for r in group if self._num(r.get("pnl_pct")) > 0)
+                group_pnl = sum(self._num(r.get("pnl_usd")) for r in group)
+                win_rate = group_wins / len(group) * 100 if group else 0
+                lines.append(
+                    f"  {key}: {len(group)} trades | win rate {win_rate:.1f}% | P&L ${group_pnl:+.2f}"
+                )
+            return "\n".join(lines)
+
+        generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        report = "\n\n".join([
+            "TradingBot23 Performance Report",
+            f"Generated: {generated}",
+            (
+                f"Trades: {total}\n"
+                f"Wins: {len(wins)} | Losses/breakeven: {len(losses)} | "
+                f"Win rate: {(len(wins) / total * 100):.1f}%\n"
+                f"Contributed capital: ${contributed_capital:,.2f}\n"
+                f"Current portfolio: ${portfolio:,.2f}\n"
+                f"Total P&L: ${total_pnl_usd:+.2f}\n"
+                f"Average P&L per trade: {avg_pnl_pct:+.2f}%\n"
+                f"Best trade: {best.get('symbol', '')} {self._num(best.get('pnl_pct')):+.2f}% "
+                f"(${self._num(best.get('pnl_usd')):+.2f})\n"
+                f"Worst trade: {worst.get('symbol', '')} {self._num(worst.get('pnl_pct')):+.2f}% "
+                f"(${self._num(worst.get('pnl_usd')):+.2f})"
+            ),
+            section("By Engine", by_engine),
+            section("By Entry Leverage", by_leverage),
+            section("By Exit Reason", by_reason),
+            "Note: This report summarizes local paper futures history from trade_history.csv.",
+        ])
+
+        out = config.DATA_DIR / f"performance_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        out.write_text(report, encoding="utf-8")
+        self._hist_summary_var.set(f"Report exported: {out.name}")
+
+    # ── P2P arbitrage tab ────────────────────────────────────────────────────
+
+    def _build_p2p_tab(self, parent):
+        body = tk.Frame(parent, bg="#0d1117", padx=15, pady=12)
+        body.pack(fill="both", expand=True)
+
+        top = tk.Frame(body, bg="#0d1117")
+        top.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(top, text="USDT/PHP P2P CYCLE COMMAND CENTER", style="Header.TLabel",
+                  background="#0d1117").pack(side="left")
+        ttk.Button(top, text="Log Top Route", style="Btn.TButton",
+                   command=self._log_top_p2p_route).pack(side="right", padx=(6, 0))
+        ttk.Button(top, text="Refresh", style="Btn.TButton",
+                   command=self._refresh_p2p).pack(side="right")
+
+        controls = tk.Frame(body, bg="#0d1117")
+        controls.pack(fill="x", pady=(0, 8))
+
+        self._p2p_capital_php = tk.StringVar(value="500000")
+        self._p2p_min_profit_pct = tk.StringVar(value="0.10")
+        self._p2p_transfer_fee_usdt = tk.StringVar(value="1.0")
+        self._p2p_buffer_php = tk.StringVar(value="0")
+
+        for label_text, var, width in [
+            ("Capital PHP", self._p2p_capital_php, 10),
+            ("Min net %", self._p2p_min_profit_pct, 6),
+            ("Xfer fee USDT", self._p2p_transfer_fee_usdt, 6),
+            ("Buffer PHP", self._p2p_buffer_php, 7),
+        ]:
+            group = tk.Frame(controls, bg="#0d1117")
+            group.pack(side="left", padx=(0, 12))
+            ttk.Label(group, text=label_text, foreground="#8b949e", background="#0d1117",
+                      font=("Consolas", 8)).pack(anchor="w")
+            tk.Entry(
+                group,
+                textvariable=var,
+                width=width,
+                font=("Consolas", 9),
+                bg="#f0f6fc",
+                fg="#0d1117",
+                insertbackground="#0d1117",
+                selectbackground="#58a6ff",
+                selectforeground="#0d1117",
+                relief="solid",
+                bd=1,
+                highlightthickness=1,
+                highlightbackground="#8b949e",
+                highlightcolor="#58a6ff",
+            ).pack(anchor="w")
+
+        ttk.Button(controls, text="Recalculate", style="Btn.TButton",
+                   command=self._recalculate_p2p_routes).pack(side="left", padx=(0, 12), pady=(13, 0))
+
+        self._p2p_status_var = tk.StringVar(value="Open this tab or press Refresh to load prices.")
+        ttk.Label(body, textvariable=self._p2p_status_var, foreground="#8b949e",
+                  background="#0d1117", font=("Consolas", 9)).pack(fill="x", anchor="w")
+
+        summary = tk.Frame(body, bg="#0d1117")
+        summary.pack(fill="x", pady=(8, 10))
+
+        self._p2p_buy_var = tk.StringVar(value="--")
+        self._p2p_sell_var = tk.StringVar(value="--")
+        self._p2p_top_profit_var = tk.StringVar(value="--")
+        self._p2p_top_route_var = tk.StringVar(value="--")
+
+        for label_text, var in [
+            ("BEST BUY USDT", self._p2p_buy_var),
+            ("BEST SELL USDT", self._p2p_sell_var),
+            ("TOP NET PROFIT", self._p2p_top_profit_var),
+            ("TOP ROUTE", self._p2p_top_route_var),
+        ]:
+            card = tk.Frame(summary, bg="#161b22",
+                            highlightbackground="#30363d", highlightthickness=1)
+            card.pack(side="left", padx=(0, 8), ipadx=12, ipady=6)
+            ttk.Label(card, text=label_text, foreground="#8b949e", background="#161b22",
+                      font=("Consolas", 8)).pack(anchor="w")
+            ttk.Label(card, textvariable=var, foreground="#58a6ff", background="#161b22",
+                      font=("Consolas", 14, "bold")).pack(anchor="w")
+
+        route_section = tk.Frame(body, bg="#0d1117")
+        route_section.pack(fill="x", expand=False, pady=(0, 6))
+        ttk.Label(route_section, text="ROUTE CALCULATOR", style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(0, 3))
+
+        route_cols = ("route", "size", "buy", "sell", "profit", "pct", "grade", "warnings")
+        self.p2p_route_tree = ttk.Treeview(route_section, columns=route_cols, show="headings", height=3)
+        for col, heading, width in [
+            ("route", "ROUTE", 115),
+            ("size", "SIZE PHP", 95),
+            ("buy", "BUY", 135),
+            ("sell", "SELL", 135),
+            ("profit", "NET PHP", 95),
+            ("pct", "NET %", 65),
+            ("grade", "GRADE", 65),
+            ("warnings", "WARNINGS", 220),
+        ]:
+            self.p2p_route_tree.heading(col, text=heading)
+            self.p2p_route_tree.column(col, width=width, anchor="center")
+        self.p2p_route_tree.tag_configure("A", foreground="#3fb950")
+        self.p2p_route_tree.tag_configure("B", foreground="#58a6ff")
+        self.p2p_route_tree.tag_configure("C", foreground="#e3b341")
+        self.p2p_route_tree.tag_configure("REVIEW", foreground="#f85149")
+        self.p2p_route_tree.tag_configure("WATCH", foreground="#8b949e")
+        self.p2p_route_tree.tag_configure("SKIP", foreground="#f85149")
+        self.p2p_route_tree.pack(fill="both", expand=True)
+
+        ad_tables = tk.Frame(body, bg="#0d1117")
+        ad_tables.pack(fill="both", expand=True)
+        buy_parent = tk.Frame(ad_tables, bg="#0d1117")
+        sell_parent = tk.Frame(ad_tables, bg="#0d1117")
+        buy_parent.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        sell_parent.pack(side="left", fill="both", expand=True, padx=(6, 0))
+
+        self.p2p_buy_tree = self._build_p2p_table(
+            buy_parent,
+            "BUY USDT WITH PHP (LOWEST SELLER PRICES)",
+            height=8,
+        )
+        self.p2p_sell_tree = self._build_p2p_table(
+            sell_parent,
+            "SELL USDT FOR PHP (HIGHEST BUYER PRICES)",
+            height=8,
+        )
+
+        journal = tk.Frame(body, bg="#0d1117")
+        journal.pack(fill="both", expand=True, pady=(0, 4))
+        ttk.Label(journal, text="RECENT P2P CYCLE JOURNAL", style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(0, 3))
+        journal_cols = ("time", "status", "route", "size", "profit", "notes")
+        self.p2p_journal_tree = ttk.Treeview(journal, columns=journal_cols, show="headings", height=4)
+        for col, heading, width in [
+            ("time", "TIME", 120),
+            ("status", "STATUS", 85),
+            ("route", "ROUTE", 120),
+            ("size", "SIZE PHP", 90),
+            ("profit", "EXP PHP", 90),
+            ("notes", "NOTES", 320),
+        ]:
+            self.p2p_journal_tree.heading(col, text=heading)
+            self.p2p_journal_tree.column(col, width=width, anchor="center")
+        self.p2p_journal_tree.pack(fill="both", expand=True)
+        self._refresh_p2p_journal()
+
+    def _build_p2p_table(self, parent, title: str, height: int):
+        section = tk.Frame(parent, bg="#0d1117")
+        section.pack(fill="both", expand=True, pady=(0, 10))
+
+        ttk.Label(section, text=title, style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(0, 3))
+
+        table_frame = tk.Frame(section, bg="#0d1117")
+        table_frame.pack(fill="both", expand=True)
+
+        cols = ("price", "limits", "available", "methods", "advertiser", "finish", "orders")
+        tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=height)
+        for col, heading, width in [
+            ("price", "PRICE PHP", 85),
+            ("limits", "LIMIT PHP", 145),
+            ("available", "AVAIL USDT", 95),
+            ("methods", "PAYMENT", 190),
+            ("advertiser", "ADVERTISER", 135),
+            ("finish", "FINISH", 70),
+            ("orders", "ORDERS", 70),
+        ]:
+            tree.heading(col, text=heading)
+            tree.column(col, width=width, anchor="center")
+
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        return tree
+
+    def _refresh_p2p(self):
+        if self._p2p_refreshing:
+            return
+        if not hasattr(self, "_p2p_status_var"):
+            return
+
+        self._p2p_refreshing = True
+        self._p2p_next_refresh_ts = time.time() + self.P2P_REFRESH_SECS
+        self._p2p_status_var.set("Loading Binance P2P USDT/PHP and recalculating routes...")
+
+        worker = threading.Thread(target=self._load_p2p_snapshot, daemon=True)
+        worker.start()
+
+    def _load_p2p_snapshot(self):
+        snapshot = None
+        error = None
+        try:
+            snapshot = self.p2p_monitor.fetch_snapshot(rows=20)
+        except Exception as exc:
+            logger.exception("Failed to refresh P2P monitor")
+            error = str(exc)
+
+        def finish():
+            self._p2p_refreshing = False
+            if snapshot:
+                self._apply_p2p_snapshot(snapshot)
+            else:
+                self._p2p_status_var.set(f"P2P load failed: {error or 'unknown error'}")
+
+        try:
+            self.root.after(0, finish)
+        except tk.TclError:
+            pass
+
+    def _apply_p2p_snapshot(self, snapshot: P2PSnapshot):
+        self._p2p_last_snapshot = snapshot
+
+        buy = snapshot.best_buy
+        sell = snapshot.best_sell
+
+        self._p2p_buy_var.set(f"{buy.price:,.2f} PHP" if buy else "--")
+        self._p2p_sell_var.set(f"{sell.price:,.2f} PHP" if sell else "--")
+
+        self._fill_p2p_tree(self.p2p_buy_tree, snapshot.buy_ads)
+        self._fill_p2p_tree(self.p2p_sell_tree, snapshot.sell_ads)
+        self._recalculate_p2p_routes(update_status=False)
+
+        self._p2p_status_var.set(
+            f"USDT/PHP updated {snapshot.as_of.strftime('%H:%M:%S')} UTC  |  "
+            "Routes are estimates only; manual fiat verification is still required."
+        )
+
+    def _recalculate_p2p_routes(self, update_status: bool = True):
+        if not self._p2p_last_snapshot:
+            if update_status and hasattr(self, "_p2p_status_var"):
+                self._p2p_status_var.set("Load P2P prices before recalculating routes.")
+            return
+
+        settings = self._p2p_route_settings()
+        if not settings:
+            return
+
+        self._p2p_routes = build_p2p_routes([self._p2p_last_snapshot], settings=settings)
+        self._fill_p2p_route_tree(self._p2p_routes)
+
+        if self._p2p_routes:
+            top = self._p2p_routes[0]
+            self._p2p_top_profit_var.set(f"{top.profit_php:+,.0f} PHP")
+            self._p2p_top_route_var.set(f"{top.route_label} {top.grade}")
+            if update_status:
+                self._p2p_status_var.set(
+                    f"Recalculated {len(self._p2p_routes)} route(s) for "
+                    f"{settings.capital_php:,.0f} PHP capital."
+                )
+        else:
+            self._p2p_top_profit_var.set("--")
+            self._p2p_top_route_var.set("--")
+            if update_status:
+                self._p2p_status_var.set("No route meets the current profit filters.")
+
+    def _p2p_route_settings(self) -> P2PRouteSettings | None:
+        try:
+            capital_php = float(self._p2p_capital_php.get())
+            min_profit_pct = float(self._p2p_min_profit_pct.get())
+            transfer_fee = float(self._p2p_transfer_fee_usdt.get())
+            buffer_php = float(self._p2p_buffer_php.get())
+        except ValueError as exc:
+            self._p2p_status_var.set(f"P2P settings error: {exc}")
+            return None
+
+        if capital_php <= 0:
+            self._p2p_status_var.set("P2P settings error: capital must be positive")
+            return None
+        if min_profit_pct < 0 or transfer_fee < 0 or buffer_php < 0:
+            self._p2p_status_var.set("P2P settings error: min %, fee, and buffer cannot be negative")
+            return None
+
+        return P2PRouteSettings(
+            capital_php=capital_php,
+            min_profit_php=-1_000_000_000.0,
+            min_profit_pct=min_profit_pct,
+            cross_exchange_transfer_fee_usdt=transfer_fee,
+            local_buffer_php=buffer_php,
+        )
+
+    def _fill_p2p_route_tree(self, routes: list[P2PRoute]):
+        for item in self.p2p_route_tree.get_children():
+            self.p2p_route_tree.delete(item)
+
+        for route in routes:
+            warnings = "; ".join(route.warnings) if route.warnings else "ok"
+            self.p2p_route_tree.insert("", "end", tags=(route.grade,), values=(
+                route.route_label,
+                f"{route.size_php:,.0f}",
+                f"{route.buy_ad.marketplace} {route.buy_ad.price:,.2f}",
+                f"{route.sell_ad.marketplace} {route.sell_ad.price:,.2f}",
+                f"{route.profit_php:+,.0f}",
+                f"{route.profit_pct:+.3f}%",
+                route.grade,
+                self._clip_text(warnings, 34),
+            ))
+
+    def _log_top_p2p_route(self):
+        if not self._p2p_routes:
+            self._p2p_status_var.set("No P2P route to log yet.")
+            return
+
+        route = self._p2p_routes[0]
+        if route.profit_php <= 0:
+            self._p2p_status_var.set("Top P2P route is not profitable, not logged.")
+            return
+        path = self.p2p_journal.append(route, status="WATCHLIST")
+        self._refresh_p2p_journal()
+        self._p2p_status_var.set(f"Logged top P2P route to {path.name}.")
+
+    def _refresh_p2p_journal(self):
+        if not hasattr(self, "p2p_journal_tree"):
+            return
+        for item in self.p2p_journal_tree.get_children():
+            self.p2p_journal_tree.delete(item)
+
+        for row in reversed(self.p2p_journal.recent(limit=8)):
+            ts = row.get("timestamp", "")
+            time_text = ts[:16].replace("T", " ")
+            self.p2p_journal_tree.insert("", "end", values=(
+                time_text,
+                row.get("status", ""),
+                row.get("route", ""),
+                f"{self._num(row.get('size_php')):,.0f}",
+                f"{self._num(row.get('expected_profit_php')):+,.0f}",
+                self._clip_text(row.get("notes", "") or row.get("warnings", ""), 48),
+            ))
+
+    def _fill_p2p_tree(self, tree, ads):
+        for item in tree.get_children():
+            tree.delete(item)
+
+        for ad in ads:
+            tree.insert("", "end", values=(
+                f"{ad.price:,.2f}",
+                f"{ad.min_limit:,.0f}-{ad.max_limit:,.0f}",
+                f"{ad.available:,.2f}",
+                self._clip_text(ad.methods_text, 34),
+                self._clip_text(ad.advertiser, 22),
+                self._format_rate(ad.completion_rate),
+                str(ad.orders) if ad.orders is not None else "--",
+            ))
+
+    @staticmethod
+    def _format_rate(rate: float | None) -> str:
+        if rate is None:
+            return "--"
+        pct = rate * 100 if rate <= 1 else rate
+        return f"{pct:.1f}%"
+
+    @staticmethod
+    def _clip_text(value: str, limit: int) -> str:
+        text = str(value or "")
+        return text if len(text) <= limit else text[: max(0, limit - 3)] + "..."
+
     # ── Settings tab ──────────────────────────────────────────────────────────
 
     def _build_settings_tab(self, parent):
-        pad = {"padx": 15, "pady": 6}
+        body = tk.Frame(parent, bg="#0d1117", padx=15, pady=14)
+        body.pack(fill="both", expand=True)
 
-        ttk.Label(parent, text="TRADING PARAMETERS", style="Header.TLabel",
-                  background="#0d1117").pack(anchor="w", padx=15, pady=(14, 4))
+        settings_panel = tk.Frame(body, bg="#0d1117")
+        settings_panel.pack(side="left", fill="y", anchor="nw")
 
-        grid = tk.Frame(parent, bg="#0d1117")
-        grid.pack(fill="x", padx=15)
+        ttk.Label(settings_panel, text="TRADING PARAMETERS", style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(0, 4))
+
+        grid = tk.Frame(settings_panel, bg="#0d1117")
+        grid.pack(fill="x")
+
+        def field(parent, var, width):
+            return tk.Entry(
+                parent,
+                textvariable=var,
+                width=width,
+                font=("Consolas", 10),
+                bg="#f0f6fc",
+                fg="#0d1117",
+                insertbackground="#0d1117",
+                selectbackground="#58a6ff",
+                selectforeground="#0d1117",
+                relief="solid",
+                bd=1,
+                highlightthickness=1,
+                highlightbackground="#8b949e",
+                highlightcolor="#58a6ff",
+            )
 
         def row(label, widget_factory, r):
             ttk.Label(grid, text=label, foreground="#8b949e", background="#0d1117",
@@ -441,22 +942,39 @@ class Dashboard:
 
         # Capital
         self._s_capital = tk.StringVar(value=str(int(config.CAPITAL_USD)))
-        row("Capital (USD)", lambda p: ttk.Entry(p, textvariable=self._s_capital, width=10,
-            font=("Consolas",10)), 0)
+        row("Capital (USD)", lambda p: field(p, self._s_capital, 10), 0)
 
         # Leverage
         self._s_leverage = tk.IntVar(value=config.LEVERAGE)
-        lf = tk.Frame(grid, bg="#0d1117")
-        lf.grid(row=1, column=1, sticky="w", padx=8, pady=4)
+        lev_frame = tk.Frame(grid, bg="#0d1117")
+        lev_frame.grid(row=1, column=1, sticky="w", padx=8, pady=4)
         ttk.Label(grid, text="Leverage", foreground="#8b949e", background="#0d1117",
                   font=("Consolas", 9), width=22).grid(row=1, column=0, sticky="w", pady=4)
-        for lv in range(1, 6):
-            ttk.Radiobutton(lf, text=f"{lv}x", variable=self._s_leverage, value=lv).pack(side="left", padx=4)
+        tk.Spinbox(
+            lev_frame,
+            from_=1,
+            to=config.MAX_LEVERAGE,
+            textvariable=self._s_leverage,
+            width=5,
+            font=("Consolas", 10),
+            bg="#f0f6fc",
+            fg="#0d1117",
+            buttonbackground="#c9d1d9",
+            insertbackground="#0d1117",
+            selectbackground="#58a6ff",
+            selectforeground="#0d1117",
+            relief="solid",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground="#8b949e",
+            highlightcolor="#58a6ff",
+        ).pack(side="left")
+        ttk.Label(lev_frame, text="x", foreground="#8b949e", background="#0d1117",
+                  font=("Consolas", 9)).pack(side="left", padx=(6, 0))
 
         # TP %
         self._s_tp = tk.StringVar(value=str(round(config.FUTURES_NET_TP_PCT * 100, 2)))
-        row("TP target (% net)", lambda p: ttk.Entry(p, textvariable=self._s_tp, width=8,
-            font=("Consolas",10)), 2)
+        row("TP target (% net)", lambda p: field(p, self._s_tp, 8), 2)
 
         # SL enable + %
         self._s_sl_enabled = tk.BooleanVar(value=config.FUTURES_USE_SL)
@@ -466,34 +984,66 @@ class Dashboard:
         ttk.Label(grid, text="Stop Loss", foreground="#8b949e", background="#0d1117",
                   font=("Consolas", 9), width=22).grid(row=3, column=0, sticky="w", pady=4)
         ttk.Checkbutton(sl_frame, text="Enable", variable=self._s_sl_enabled).pack(side="left")
-        ttk.Entry(sl_frame, textvariable=self._s_sl, width=8,
-                  font=("Consolas",10)).pack(side="left", padx=8)
+        field(sl_frame, self._s_sl, 8).pack(side="left", padx=8)
         ttk.Label(sl_frame, text="% net", foreground="#8b949e", background="#0d1117",
                   font=("Consolas",9)).pack(side="left")
 
         # Max hold days
         self._s_hold = tk.StringVar(value=str(config.MAX_HOLD_DAYS))
-        row("Max hold (days)", lambda p: ttk.Entry(p, textvariable=self._s_hold, width=8,
-            font=("Consolas",10)), 4)
+        row("Max hold (days)", lambda p: field(p, self._s_hold, 8), 4)
 
         # Per trade %
         self._s_per_trade = tk.StringVar(value=str(round(config.PER_TRADE_PCT * 100, 0)))
-        row("Per trade (% of portfolio)", lambda p: ttk.Entry(p, textvariable=self._s_per_trade, width=8,
-            font=("Consolas",10)), 5)
+        row("Per trade (% of portfolio)", lambda p: field(p, self._s_per_trade, 8), 5)
+
+        # Monthly contribution
+        self._s_monthly_contribution = tk.StringVar(value=str(round(config.MONTHLY_CONTRIBUTION_USD, 2)))
+        row("Monthly contribution ($)", lambda p: field(p, self._s_monthly_contribution, 8), 6)
+
+        self._s_monthly_day = tk.StringVar(value=str(config.MONTHLY_CONTRIBUTION_DAY))
+        row("Contribution day", lambda p: field(p, self._s_monthly_day, 8), 7)
 
         # Apply button
         self._s_status = tk.StringVar(value="")
-        bf = tk.Frame(parent, bg="#0d1117")
-        bf.pack(fill="x", padx=15, pady=12)
+        bf = tk.Frame(settings_panel, bg="#0d1117")
+        bf.pack(fill="x", pady=12)
         ttk.Button(bf, text="Apply Settings", style="Btn.TButton",
                    command=self._apply_settings).pack(side="left")
         ttk.Label(bf, textvariable=self._s_status, foreground="#3fb950",
                   background="#0d1117", font=("Consolas", 9)).pack(side="left", padx=12)
 
-        ttk.Label(parent,
+        ttk.Label(settings_panel,
                   text="Changes apply to new trades only. Open positions keep their original settings.",
                   foreground="#8b949e", background="#0d1117",
-                  font=("Consolas", 8)).pack(anchor="w", padx=15)
+                  font=("Consolas", 8)).pack(anchor="w")
+
+        schedule_panel = tk.Frame(body, bg="#0d1117")
+        schedule_panel.pack(side="left", fill="both", expand=True, padx=(28, 0), anchor="n")
+        ttk.Label(schedule_panel, text="12-MONTH CONTRIBUTION PLAN", style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(0, 4))
+
+        self._contrib_summary_var = tk.StringVar(value="")
+        ttk.Label(schedule_panel, textvariable=self._contrib_summary_var,
+                  foreground="#8b949e", background="#0d1117",
+                  font=("Consolas", 9)).pack(anchor="w", pady=(0, 6))
+
+        contrib_cols = ("month", "due", "amount", "status")
+        self.contrib_tree = ttk.Treeview(
+            schedule_panel, columns=contrib_cols, show="headings", height=12,
+        )
+        for col, heading, width in [
+            ("month", "MONTH", 80),
+            ("due", "DUE", 90),
+            ("amount", "AMOUNT", 80),
+            ("status", "STATUS", 90),
+        ]:
+            self.contrib_tree.heading(col, text=heading)
+            self.contrib_tree.column(col, width=width, anchor="center")
+        self.contrib_tree.tag_configure("paid", foreground="#3fb950")
+        self.contrib_tree.tag_configure("due", foreground="#e3b341")
+        self.contrib_tree.tag_configure("scheduled", foreground="#8b949e")
+        self.contrib_tree.pack(fill="x", anchor="n")
+        self._update_contribution_schedule()
 
     def _apply_settings(self):
         try:
@@ -504,11 +1054,20 @@ class Dashboard:
             sl_pct    = float(self._s_sl.get()) / 100
             hold_days = int(self._s_hold.get())
             per_trade = float(self._s_per_trade.get()) / 100
+            monthly_contribution = float(self._s_monthly_contribution.get())
+            monthly_day = int(self._s_monthly_day.get())
         except ValueError as e:
             self._s_status.set(f"Error: {e}")
             return
 
         leverage = max(1, min(leverage, config.MAX_LEVERAGE))
+        self._s_leverage.set(leverage)
+        if monthly_contribution < 0:
+            self._s_status.set("Error: monthly contribution cannot be negative")
+            return
+        if not 1 <= monthly_day <= 31:
+            self._s_status.set("Error: contribution day must be 1-31")
+            return
 
         # Save to .env
         self._write_env({
@@ -519,6 +1078,8 @@ class Dashboard:
             "FUTURES_USE_SL":     "true" if sl_on else "false",
             "MAX_HOLD_DAYS":      hold_days,
             "PER_TRADE_PCT":      per_trade,
+            "MONTHLY_CONTRIBUTION_USD": monthly_contribution,
+            "MONTHLY_CONTRIBUTION_DAY": monthly_day,
         })
 
         # Hot-apply to config (new trades pick these up immediately)
@@ -529,11 +1090,26 @@ class Dashboard:
         config.FUTURES_USE_SL     = sl_on
         config.MAX_HOLD_DAYS      = hold_days
         config.PER_TRADE_PCT      = per_trade
+        config.MONTHLY_CONTRIBUTION_USD = monthly_contribution
+        config.MONTHLY_CONTRIBUTION_DAY = monthly_day
         self.trader.leverage      = leverage
+        self.engine_var.set(self._new_trade_setting_text())
 
         self._s_status.set(
             f"Applied!  Leverage: {leverage}x  |  TP: {tp_pct*100:.2f}%  |  "
-            f"SL: {'ON' if sl_on else 'OFF'}  |  Hold: {hold_days}d")
+            f"SL: {'ON' if sl_on else 'OFF'}  |  Add ${monthly_contribution:.2f}/mo")
+        self._update_contribution_schedule()
+
+    @staticmethod
+    def _new_trade_setting_text() -> str:
+        return f"   NEW TRADES: FUTURES {config.LEVERAGE}x"
+
+    @staticmethod
+    def _num(value, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     @staticmethod
     def _write_env(updates: dict) -> None:
@@ -564,6 +1140,8 @@ class Dashboard:
             self._draw_charts()
         elif tab == "History":
             self._refresh_history()
+        elif tab == "P2P Arb" and self._p2p_last_snapshot is None:
+            self._refresh_p2p()
 
     # ── Button handlers ────────────────────────────────────────────────────────
 
@@ -667,8 +1245,22 @@ class Dashboard:
             self._update_positions()
             self._update_closed()
             self._update_basket()
+            self._update_contribution_schedule()
+            self._maybe_refresh_p2p_tab()
         except Exception:
             logger.debug("Dashboard refresh error", exc_info=True)
+
+    def _maybe_refresh_p2p_tab(self):
+        if self._p2p_refreshing:
+            return
+        if not hasattr(self, "notebook") or not hasattr(self, "_p2p_status_var"):
+            return
+        try:
+            tab = self.notebook.tab(self.notebook.select(), "text").strip()
+        except tk.TclError:
+            return
+        if tab == "P2P Arb" and time.time() >= self._p2p_next_refresh_ts:
+            self._refresh_p2p()
 
     def _update_clock(self):
         self.clock_label.config(
@@ -697,7 +1289,11 @@ class Dashboard:
         portfolio      = self.trader.get_portfolio_value()
         cash           = self.trader.cash_balance
         stats          = self.trader.get_stats()
-        initial        = config.CAPITAL_USD
+        initial        = (
+            self.trader.get_contributed_capital()
+            if hasattr(self.trader, "get_contributed_capital")
+            else config.CAPITAL_USD
+        )
         pnl_pct        = ((portfolio - initial) / initial) * 100 if initial > 0 else 0
         open_positions = list(self.trader.get_open_positions())  # snapshot
 
@@ -720,10 +1316,7 @@ class Dashboard:
             if current and pos.entry_price > 0:
                 price_chg = (current - pos.entry_price) / pos.entry_price
                 lev_pnl   = price_chg * leverage * 100
-                if config.ENGINE == "futures":
-                    pnl_str = f"{lev_pnl:+.2f}% ({price_chg*100:+.2f}% price)"
-                else:
-                    pnl_str = f"{lev_pnl:+.2f}%"
+                pnl_str = f"{lev_pnl:+.2f}% ({price_chg*100:+.2f}% price)"
             else:
                 pnl_str = "--"
             risk_price = getattr(pos, "liquidation_price", None)
@@ -775,6 +1368,39 @@ class Dashboard:
             self.basket_var.set(f"Basket{ms}: {', '.join(syms)}")
         else:
             self.basket_var.set("Basket: waiting for first cycle...")
+
+    def _update_contribution_schedule(self):
+        if not hasattr(self, "contrib_tree"):
+            return
+
+        for item in self.contrib_tree.get_children():
+            self.contrib_tree.delete(item)
+
+        rows = accounting.contribution_schedule(months=12)
+        paid_count = 0
+        due_count = 0
+        total_planned = 0.0
+        for row in rows:
+            status = row["status"]
+            amount = self._num(row["amount_usd"])
+            paid_count += 1 if status == "paid" else 0
+            due_count += 1 if status == "due" else 0
+            total_planned += amount
+            self.contrib_tree.insert("", "end", values=(
+                row["month"],
+                row["date"],
+                f"${amount:,.2f}",
+                status.upper(),
+            ), tags=(status,))
+
+        if rows:
+            amount = self._num(rows[0]["amount_usd"])
+            day = config.MONTHLY_CONTRIBUTION_DAY
+            self._contrib_summary_var.set(
+                f"${amount:,.2f}/month on day {day}  |  "
+                f"{paid_count}/12 paid  |  {due_count} due  |  "
+                f"12-mo plan ${total_planned:,.2f}"
+            )
 
     def _on_close(self):
         self._running = False

@@ -15,49 +15,34 @@ x-bot-base: &bot-base
 
 services:
   # ----- User: ikel -----
-  ikel-spot:
+  ikel-futures:
     <<: *bot-base
-    container_name: tb23-ikel-spot
+    container_name: tb23-ikel-futures
     profiles: ["ikel"]
     env_file: users/ikel/.env
     environment:
-      - ENGINE=spot
+      - ENGINE=futures
       - DATA_DIR=/app/data
       - LOG_DIR=/app/logs
     volumes:
       - ./users/ikel/data:/app/data
       - ./users/ikel/logs:/app/logs
-    command: ["python", "-m", "bot.main", "--mode", "paper", "--engine", "spot"]
-
-  # Uncomment to also run futures for ikel:
-  # ikel-futures:
-  #   <<: *bot-base
-  #   container_name: tb23-ikel-futures
-  #   profiles: ["ikel"]
-  #   env_file: users/ikel/.env
-  #   environment:
-  #     - ENGINE=futures
-  #     - DATA_DIR=/app/data-futures
-  #     - LOG_DIR=/app/logs-futures
-  #   volumes:
-  #     - ./users/ikel/data-futures:/app/data-futures
-  #     - ./users/ikel/logs-futures:/app/logs-futures
-  #   command: ["python", "-m", "bot.main", "--mode", "paper", "--engine", "futures"]
+    command: ["python", "-m", "bot.main", "--mode", "paper"]
 
   # ----- User: friend -----
   # After running: bash add-user.sh  (enter "friend" as username)
   # Uncomment this block:
 
-  # friend-spot:
+  # friend-futures:
   #   <<: *bot-base
-  #   container_name: tb23-friend-spot
+  #   container_name: tb23-friend-futures
   #   profiles: ["friend"]
   #   env_file: users/friend/.env
   #   environment:
-  #     - ENGINE=spot
+  #     - ENGINE=futures
   #     - DATA_DIR=/app/data
   #     - LOG_DIR=/app/logs
   #   volumes:
   #     - ./users/friend/data:/app/data
   #     - ./users/friend/logs:/app/logs
-  #   command: ["python", "-m", "bot.main", "--mode", "paper", "--engine", "spot"]
+  #   command: ["python", "-m", "bot.main", "--mode", "paper"]

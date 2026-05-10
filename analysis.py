@@ -24,10 +24,16 @@ TOP_N_COINS     = 100
 TOP_N_LOSERS    = 5
 PER_TRADE_PCT   = 0.20
 DIP_THRESHOLD   = -2.0          # % daily change to trigger entry
-FEE_PCT         = 0.0006        # 0.06% per side (1x futures)
-GROSS_TP        = 0.0120        # 1.2% gross TP (≈1% net after 2×0.06% fees)
-GROSS_SL        = 0.0130        # 1.3% gross SL
+LEVERAGE        = 1
+FUTURES_FEE_PCT = 0.0006        # 0.06% per side on notional
+NET_TP          = 0.01          # 1% net on margin after fees/funding
+NET_SL          = 0.015         # 1.5% net reference
+FUNDING_DAILY   = 0.0003        # 0.03%/day funding drag on notional
 MAX_HOLD_DAYS   = 3
+FEE_DRAG        = 2 * FUTURES_FEE_PCT * LEVERAGE
+FUNDING_DRAG    = FUNDING_DAILY * MAX_HOLD_DAYS * LEVERAGE
+GROSS_TP        = (NET_TP + FEE_DRAG + FUNDING_DRAG) / LEVERAGE
+GROSS_SL        = max((NET_SL - FEE_DRAG - FUNDING_DRAG) / LEVERAGE, 0.001)
 CAPITAL         = 500.0
 BACKTEST_MONTHS = 12            # last 12 months
 
@@ -60,7 +66,7 @@ def cg_top_coins(limit=100):
     return coins[:limit]
 
 def binance_klines(symbol, start_dt, end_dt):
-    url = "https://api.binance.com/api/v3/klines"
+    url = "https://fapi.binance.com/fapi/v1/klines"
     params = {
         "symbol": f"{symbol}USDT",
         "interval": "1d",
@@ -177,13 +183,11 @@ def run_backtest(coins):
                 elif held >= MAX_HOLD_DAYS:
                     reason, exit_p = "expired", c["close"]
                 if reason:
-                    fee  = exit_p * pos["qty"] * FEE_PCT
-                    proc = exit_p * pos["qty"] - fee
-                    cash += proc
-                    entry_eff = pos["entry"] * (1 + FEE_PCT)
-                    exit_eff  = exit_p       * (1 - FEE_PCT)
-                    pnl_pct   = (exit_eff - entry_eff) / entry_eff * 100
-                    pnl_usd   = (exit_eff - entry_eff) * pos["qty"]
+                    exit_fee = exit_p * pos["qty"] * FUTURES_FEE_PCT
+                    gross_pnl = (exit_p - pos["entry"]) * pos["qty"]
+                    pnl_usd = gross_pnl - pos["entry_fee"] - exit_fee
+                    pnl_pct = pnl_usd / pos["margin"] * 100 if pos["margin"] else 0
+                    cash += pos["margin"] + gross_pnl - exit_fee
                     t = {**pos, "exit_date": day, "exit_price": exit_p,
                          "reason": reason, "pnl_pct": pnl_pct, "pnl_usd": pnl_usd}
                     month_trades.append(t)
@@ -204,21 +208,27 @@ def run_backtest(coins):
                 chg = (c["close"] - pc["close"]) / pc["close"] * 100
                 if chg > DIP_THRESHOLD:
                     continue
-                open_val = sum(p["qty"] * candle_on(klines.get(p["symbol"],[]),day or p["entry"])["close"]
-                               if candle_on(klines.get(p["symbol"],[]),day) else p["qty"]*p["entry"]
-                               for p in open_pos)
+                open_val = 0
+                for p in open_pos:
+                    mark_candle = candle_on(klines.get(p["symbol"], []), day)
+                    mark = mark_candle["close"] if mark_candle else p["entry"]
+                    exit_fee = mark * p["qty"] * FUTURES_FEE_PCT
+                    open_val += p["margin"] + ((mark - p["entry"]) * p["qty"]) - exit_fee
                 portfolio  = cash + open_val
-                trade_amt  = min(portfolio * PER_TRADE_PCT, cash)
-                if trade_amt < 10:
+                margin = min(portfolio * PER_TRADE_PCT, cash / (1 + LEVERAGE * FUTURES_FEE_PCT))
+                if margin < 10:
                     continue
                 ep  = c["close"]
-                qty = trade_amt * (1 - FEE_PCT) / ep
-                cash -= trade_amt
+                notional = margin * LEVERAGE
+                qty = notional / ep
+                entry_fee = notional * FUTURES_FEE_PCT
+                cash -= margin + entry_fee
                 open_pos.append({
                     "symbol": sym, "entry": ep, "qty": qty,
                     "tp": ep * (1 + GROSS_TP), "sl": ep * (1 - GROSS_SL),
                     "entry_date": datetime.combine(day, datetime.min.time()).replace(tzinfo=timezone.utc),
-                    "amount_usd": trade_amt, "trigger_chg": chg,
+                    "amount_usd": margin, "margin": margin, "entry_fee": entry_fee,
+                    "leverage": LEVERAGE, "trigger_chg": chg,
                 })
 
         # Close remaining at month end
@@ -226,15 +236,14 @@ def run_backtest(coins):
             last = dates[-1] if dates else month_end.date()
             c = candle_on(klines.get(pos["symbol"],[]), last)
             exit_p = c["close"] if c else pos["entry"]
-            fee    = exit_p * pos["qty"] * FEE_PCT
-            proc   = exit_p * pos["qty"] - fee
-            cash  += proc
-            entry_eff = pos["entry"] * (1 + FEE_PCT)
-            exit_eff  = exit_p       * (1 - FEE_PCT)
-            pnl_pct   = (exit_eff - entry_eff) / entry_eff * 100
+            exit_fee = exit_p * pos["qty"] * FUTURES_FEE_PCT
+            gross_pnl = (exit_p - pos["entry"]) * pos["qty"]
+            pnl_usd = gross_pnl - pos["entry_fee"] - exit_fee
+            cash += pos["margin"] + gross_pnl - exit_fee
+            pnl_pct = pnl_usd / pos["margin"] * 100 if pos["margin"] else 0
             t = {**pos, "exit_date": last, "exit_price": exit_p,
                  "reason": "month_end", "pnl_pct": pnl_pct,
-                 "pnl_usd": (exit_eff - entry_eff) * pos["qty"]}
+                 "pnl_usd": pnl_usd}
             month_trades.append(t)
             all_trades.append(t)
 
