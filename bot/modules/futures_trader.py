@@ -8,7 +8,7 @@ proper risk controls (margin checks, isolated/cross mode, OCO, etc.).
 Modeled futures mechanics:
 - Leverage amplifies both gains and losses
 - Funding rate is paid every 8h (modeled as a daily drag on PNL)
-- Liquidation can wipe a position if price moves against you by ~1/leverage
+- Cross-margin liquidation uses free cash plus all open-position equity
 - Fees are charged on NOTIONAL value, not margin (so leverage multiplies fee drag)
 """
 
@@ -27,6 +27,7 @@ from bot.modules import accounting
 from bot.modules import telegram_notifier as tg
 
 logger = logging.getLogger(__name__)
+MAINTENANCE_MARGIN_RATE = 0.005
 
 _CSV_HEADER = [
     "open_time", "close_time", "symbol", "engine",
@@ -86,6 +87,7 @@ class FuturesPosition:
     last_known_price: float | None = None  # cached by trading thread, read by UI
     amount_usd: float = 0.0               # margin committed at entry
     entry_change_24h: float = 0.0         # 24h % change that triggered the buy
+    margin_mode: str = "cross"
 
 
 class FuturesTrader:
@@ -110,17 +112,11 @@ class FuturesTrader:
         self._load_open_positions()
 
         logger.info(
-            "FuturesTrader initialized | Leverage: %dx | Fee: %.3f%% per side | "
-            "Funding: %.3f%%/day | Net TP: %.3f%% | Net SL: %.3f%%",
+            "FuturesTrader initialized | Cross margin | Leverage: %dx | "
+            "Fee: %.3f%% per side | Funding: %.3f%%/day | Net TP: %.3f%% | Net SL: %.3f%%",
             self.leverage, config.FUTURES_FEE_PCT * 100,
             config.FUNDING_RATE_DAILY * 100,
             config.FUTURES_NET_TP_PCT * 100, config.FUTURES_NET_SL_PCT * 100,
-        )
-        # Liquidation distance warning (rough: 1/leverage minus maintenance margin ~0.5%)
-        liq_distance = (1 / self.leverage) - 0.005
-        logger.info(
-            "⚠️  Liquidation distance: ~%.2f%% adverse price move = total margin loss",
-            liq_distance * 100,
         )
 
     @property
@@ -189,13 +185,58 @@ class FuturesTrader:
                 unrealized += pos.margin_used * (1 + price_change * pos.leverage)
         return self.cash_balance + unrealized
 
-    def _liquidation_price(self, entry: float, leverage: int) -> float:
-        """Approximate liquidation price for a long position.
+    @staticmethod
+    def _mark_price(pos: FuturesPosition) -> float:
+        return pos.last_known_price or pos.entry_price
 
-        Real Binance formula uses maintenance margin rate (~0.5% for most pairs).
-        Simplified: liq ≈ entry × (1 - 1/leverage + maint_margin_rate)
+    def _cross_liquidation_price(
+        self,
+        target: FuturesPosition,
+        positions: list[FuturesPosition] | None = None,
+        cash_balance: float | None = None,
+    ) -> float:
+        """Approximate cross-margin liquidation price for a long position.
+
+        The model solves for the target mark price where account equity equals
+        maintenance margin, assuming other open positions stay at their latest
+        known mark. This is intentionally conservative paper math, not an
+        exchange-exact Binance liquidation formula.
         """
-        return entry * (1 - (1 / leverage) + 0.005)
+        if target.quantity <= 0:
+            return 0.0
+        open_positions = [
+            p for p in (positions or self.get_open_positions())
+            if p.status == FuturesPositionStatus.OPEN
+        ]
+        cash = self.cash_balance if cash_balance is None else cash_balance
+
+        other_equity = 0.0
+        other_maintenance = 0.0
+        for pos in open_positions:
+            if pos is target:
+                continue
+            mark = self._mark_price(pos)
+            other_equity += pos.margin_used + ((mark - pos.entry_price) * pos.quantity)
+            other_maintenance += mark * pos.quantity * MAINTENANCE_MARGIN_RATE
+
+        numerator = (
+            other_maintenance
+            - cash
+            - target.margin_used
+            - other_equity
+            + (target.quantity * target.entry_price)
+        )
+        denominator = target.quantity * (1 - MAINTENANCE_MARGIN_RATE)
+        if denominator <= 0:
+            return 0.0
+        price = numerator / denominator
+        return max(0.0, price)
+
+    def refresh_cross_liquidation_prices(self) -> None:
+        open_positions = self.get_open_positions()
+        for pos in open_positions:
+            pos.margin_mode = "cross"
+            pos.liquidation_price = self._cross_liquidation_price(pos, open_positions)
 
     def open_position(
         self, symbol: str, margin_usd: float | None = None,
@@ -274,20 +315,7 @@ class FuturesTrader:
 
         tp_price = price * (1 + gross_tp_move)
         sl_price = price * (1 - gross_sl_move)
-        liq_price = self._liquidation_price(price, self.leverage)
-
-        # Safety: SL must be ABOVE liquidation price
-        if sl_price <= liq_price:
-            logger.warning(
-                "%s: SL price $%.4f would breach liquidation $%.4f at %dx leverage. "
-                "Reduce leverage or tighten FUTURES_NET_SL_PCT.",
-                symbol, sl_price, liq_price, self.leverage,
-            )
-            return None
-
-        self.cash_balance -= margin_usd
-        self.cash_balance -= entry_fee
-        self._normalize_cash_balance()
+        projected_cash = self.cash_balance - margin_usd - entry_fee
 
         position = FuturesPosition(
             symbol=symbol,
@@ -299,20 +327,39 @@ class FuturesTrader:
             entry_time=datetime.now(timezone.utc),
             tp_price=tp_price,
             sl_price=sl_price,
-            liquidation_price=liq_price,
+            liquidation_price=0.0,
             amount_usd=margin_usd,
             entry_change_24h=entry_change_24h,
+            margin_mode="cross",
         )
+        projected_positions = self.get_open_positions() + [position]
+        liq_price = self._cross_liquidation_price(
+            position, projected_positions, projected_cash,
+        )
+
+        # Safety: SL must be ABOVE cross liquidation price.
+        if sl_price <= liq_price:
+            logger.warning(
+                "%s: SL price $%.4f would breach cross liquidation $%.4f at %dx leverage. "
+                "Reduce leverage, reduce position size, or tighten FUTURES_NET_SL_PCT.",
+                symbol, sl_price, liq_price, self.leverage,
+            )
+            return None
+
+        self.cash_balance = projected_cash
+        self._normalize_cash_balance()
+        position.liquidation_price = liq_price
         self.positions.append(position)
+        self.refresh_cross_liquidation_prices()
         self._save_open_positions()
 
         logger.info(
-            "[PAPER-FUT] LONG %s %.6f @ $%.4f | Margin $%.2f | Notional $%.2f | "
-            "TP $%.4f | SL $%.4f | LIQ $%.4f | Fee $%.2f",
+            "[PAPER-FUT] LONG %s %.6f @ $%.4f | CROSS Margin $%.2f | Notional $%.2f | "
+            "TP $%.4f | SL $%.4f | Cross LIQ $%.4f | Fee $%.2f",
             symbol, quantity, price, margin_usd, notional,
-            tp_price, sl_price, liq_price, entry_fee,
+            tp_price, sl_price, position.liquidation_price, entry_fee,
         )
-        tg.alert_opened(symbol, price, tp_price, liq_price,
+        tg.alert_opened(symbol, price, tp_price, position.liquidation_price,
                         margin_usd, self.leverage, entry_change_24h)
         return position
 
@@ -321,10 +368,8 @@ class FuturesTrader:
         closed = []
         now = datetime.now(timezone.utc)
 
-        for pos in self.positions:
-            if pos.status != FuturesPositionStatus.OPEN:
-                continue
-
+        open_positions = self.get_open_positions()
+        for pos in open_positions:
             try:
                 price = self.get_current_price(pos.symbol)
             except Exception:
@@ -333,8 +378,17 @@ class FuturesTrader:
                 continue
             pos.last_known_price = price
 
-            # Liquidation safety check (at 1x this is ~99% adverse move — almost impossible)
-            if price <= pos.liquidation_price:
+        self.refresh_cross_liquidation_prices()
+
+        for pos in open_positions:
+            if pos.status != FuturesPositionStatus.OPEN:
+                continue
+            price = pos.last_known_price
+            if price is None:
+                continue
+
+            # Cross-margin liquidation safety check.
+            if pos.liquidation_price > 0 and price <= pos.liquidation_price:
                 self._close(pos, pos.liquidation_price, FuturesPositionStatus.LIQUIDATED, now)
                 closed.append(pos)
                 continue
@@ -374,6 +428,7 @@ class FuturesTrader:
                 continue
 
         if closed:
+            self.refresh_cross_liquidation_prices()
             self._save_open_positions()
         return closed
 
@@ -402,12 +457,13 @@ class FuturesTrader:
         pos.pnl_pct = (net_pnl_usd / pos.margin_used) * 100
 
         if reason == FuturesPositionStatus.LIQUIDATED:
-            pos.pnl_pct = -100.0
-            pos.pnl_usd = -pos.margin_used
+            self.cash_balance += pos.margin_used + net_pnl_usd
+            if self.cash_balance < 0:
+                self.cash_balance = 0.0
             self._normalize_cash_balance()
             logger.warning(
-                "[PAPER-FUT] 💀 LIQUIDATED %s @ $%.4f | Lost margin $%.2f | Cash: $%.2f",
-                pos.symbol, exit_price, pos.margin_used, self.cash_balance,
+                "[PAPER-FUT] LIQUIDATED %s @ $%.4f | Cross PNL: %+.2f%% (%+.2f USD) | Cash: $%.2f",
+                pos.symbol, exit_price, pos.pnl_pct, pos.pnl_usd, self.cash_balance,
             )
             self._save_trade(pos)
             tg.alert_closed(pos.symbol, pos.entry_price, exit_price,
@@ -417,7 +473,7 @@ class FuturesTrader:
         self.cash_balance += pos.margin_used + net_pnl_usd
         self._normalize_cash_balance()
         logger.info(
-            "[PAPER-FUT] CLOSE %s @ $%.4f | %s | NET PNL: %+.2f%% (%+$%.2f) | "
+            "[PAPER-FUT] CLOSE %s @ $%.4f | %s | NET PNL: %+.2f%% (%+.2f USD) | "
             "Fee $%.2f | Funding $%.2f | Cash: $%.2f",
             pos.symbol, exit_price, reason.value, pos.pnl_pct, net_pnl_usd,
             exit_fee, funding_cost, self.cash_balance,
@@ -497,6 +553,7 @@ class FuturesTrader:
         self.cash_balance, amount = accounting.apply_monthly_contribution(self.cash_balance, now)
         self._normalize_cash_balance()
         if amount:
+            self.refresh_cross_liquidation_prices()
             self._save_open_positions()
         return amount
 
@@ -550,6 +607,7 @@ class FuturesTrader:
         self.cash_balance += delta
         self._normalize_cash_balance()
         self.account_capital_usd = new_capital
+        self.refresh_cross_liquidation_prices()
         self._save_open_positions()
         return delta
 
@@ -559,6 +617,7 @@ class FuturesTrader:
         Called when crash mode activates. Returns number of positions protected.
         """
         protected = 0
+        self.refresh_cross_liquidation_prices()
         for pos in self.positions:
             if pos.status != FuturesPositionStatus.OPEN:
                 continue
@@ -612,6 +671,7 @@ class FuturesTrader:
                     "entry_change_24h":  p.entry_change_24h,
                     "breakeven_armed":   p.breakeven_armed,
                     "crash_protected":   p.crash_protected,
+                    "margin_mode":       "cross",
                 }
                 for p in open_pos
             ],
@@ -649,6 +709,7 @@ class FuturesTrader:
                     entry_change_24h=p["entry_change_24h"],
                     breakeven_armed=p.get("breakeven_armed", False),
                     crash_protected=p.get("crash_protected", False),
+                    margin_mode=p.get("margin_mode", "cross"),
                     status=FuturesPositionStatus.OPEN,
                 )
                 self.positions.append(pos)
@@ -671,6 +732,9 @@ class FuturesTrader:
                 "Restored %d open positions from disk | Cash: $%.2f",
                 restored, self.cash_balance,
             )
+            if restored:
+                self.refresh_cross_liquidation_prices()
+                self._save_open_positions()
         except Exception:
             logger.exception("Failed to load open positions from disk")
 

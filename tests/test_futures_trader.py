@@ -41,10 +41,23 @@ class TestFuturesTrader(unittest.TestCase):
             pos = self.trader.open_position("BTC", margin_usd=1000)
         self.assertIsNotNone(pos)
         self.assertEqual(pos.leverage, 2)
+        self.assertEqual(pos.margin_mode, "cross")
         self.assertAlmostEqual(pos.notional, 2000, places=2)
         self.assertGreater(pos.tp_price, 100)
         self.assertLess(pos.sl_price, 100)
         self.assertLess(pos.liquidation_price, pos.sl_price)
+
+    def test_cross_margin_keeps_20x_small_trade_liquidation_far(self):
+        config.LEVERAGE = 20
+        config.CAPITAL_USD = 5000
+        trader = FuturesTrader()
+
+        with patch.object(trader, "get_current_price", return_value=100.0):
+            pos = trader.open_position("BTC", margin_usd=100)
+
+        self.assertIsNotNone(pos)
+        self.assertEqual(pos.leverage, 20)
+        self.assertLess(pos.liquidation_price, 50)
 
     def test_open_caps_margin_to_include_entry_fee(self):
         self.trader.cash_balance = 100
@@ -165,11 +178,12 @@ class TestFuturesTrader(unittest.TestCase):
 
     def test_liquidation(self):
         with patch.object(self.trader, "get_current_price", return_value=100.0):
-            pos = self.trader.open_position("ETH", margin_usd=1000)
-        with patch.object(self.trader, "get_current_price", return_value=pos.liquidation_price - 1):
+            pos = self.trader.open_position("ETH", margin_usd=9500)
+        with patch.object(self.trader, "get_current_price", return_value=pos.liquidation_price):
             closed = self.trader.check_positions()
         self.assertEqual(closed[0].status, FuturesPositionStatus.LIQUIDATED)
-        self.assertEqual(closed[0].pnl_pct, -100.0)
+        self.assertLess(closed[0].pnl_pct, -100.0)
+        self.assertGreaterEqual(self.trader.cash_balance, 0)
 
     def test_expiry(self):
         with patch.object(self.trader, "get_current_price", return_value=100.0):

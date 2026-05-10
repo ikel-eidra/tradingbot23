@@ -56,7 +56,7 @@ def _send(text: str) -> None:
 
 
 def alert_opened(symbol: str, entry_price: float, tp_price: float,
-                 sl_price: float, margin_usd: float, leverage: int,
+                 liq_price: float, margin_usd: float, leverage: int,
                  change_24h: float, filled: bool = False) -> None:
     emoji = _EMOJI["fill"] if filled else _EMOJI["open"]
     tag   = "FILLED (no dip)" if filled else "DIP ENTRY"
@@ -66,7 +66,7 @@ def alert_opened(symbol: str, entry_price: float, tp_price: float,
         f"Coin: <b>{symbol}</b>\n"
         f"Entry: <b>${entry_price:,.4f}</b>  ({change_24h:+.2f}% 24h)\n"
         f"Margin: <b>${margin_usd:.2f}</b>  |  Leverage: <b>{leverage}x</b>\n"
-        f"TP: ${tp_price:,.4f}  |  LIQ: ${sl_price:,.4f}"
+        f"TP: ${tp_price:,.4f}  |  Cross LIQ: ${liq_price:,.4f}"
     )
 
 
