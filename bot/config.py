@@ -16,7 +16,9 @@ if getattr(sys, "frozen", False):
 else:
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-load_dotenv(PROJECT_ROOT / ".env")
+# The app must prefer the .env beside the EXE/project over machine-wide
+# variables so unrelated bots cannot hijack credentials such as Telegram tokens.
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 
 # --- API Keys ---
