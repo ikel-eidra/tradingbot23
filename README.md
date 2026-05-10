@@ -183,6 +183,8 @@ CSV columns: `open_time, close_time, symbol, engine, entry_price, exit_price, am
 
 Monthly paper contributions are tracked in `data/account_state.json` so restarts do not double-add the same month. The Settings tab shows a 12-month contribution schedule with paid/due/scheduled markers. Dashboard portfolio P&L uses total contributed capital, not only starting capital, so deposits are not counted as profit.
 
+Changing `Capital (USD)` in Settings now syncs the active paper account: increases add free paper cash immediately, decreases withdraw from free cash only, and existing open trades keep their original margin/leverage.
+
 ---
 
 ## Futures Engine
