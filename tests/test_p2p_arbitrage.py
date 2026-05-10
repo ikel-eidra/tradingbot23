@@ -170,6 +170,48 @@ class TestP2PArbitrage(unittest.TestCase):
         self.assertGreater(state["balance_php"], 500_000)
         self.assertEqual(len(reloaded["cycles"]), 1)
 
+    def test_paper_arb_syncs_starting_capital_down_to_cash(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paper = P2PPaperArb(path=Path(tmpdir) / "paper.json")
+            paper.reset(500_000)
+            state, delta = paper.sync_starting_capital(100_000)
+            reloaded = paper.state(100_000)
+
+        self.assertAlmostEqual(delta, -400_000)
+        self.assertAlmostEqual(state["starting_php"], 100_000)
+        self.assertAlmostEqual(state["cash_php"], 100_000)
+        self.assertAlmostEqual(state["balance_php"], 100_000)
+        self.assertAlmostEqual(reloaded["balance_php"], 100_000)
+
+    def test_paper_arb_syncs_starting_capital_down_scales_open_hold(self):
+        buy_snapshot = P2PSnapshot(
+            marketplace="Binance",
+            asset="USDT",
+            fiat="PHP",
+            buy_ads=[p2p_ad("BUY", "Binance", 60.00, 1_000, 600_000, 20_000, "seller")],
+            sell_ads=[],
+            as_of=None,
+        )
+        entry = build_p2p_hold_entry(
+            [buy_snapshot],
+            P2PRouteSettings(capital_php=500_000, min_profit_pct=0.2),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paper = P2PPaperArb(path=Path(tmpdir) / "paper.json")
+            state, position = paper.open_hold(entry, target_profit_pct=0.2, starting_php=500_000)
+            self.assertIsNotNone(position)
+            self.assertAlmostEqual(state["cash_php"], 0)
+
+            state, delta = paper.sync_starting_capital(100_000)
+            hold = state["hold_position"]
+
+        self.assertAlmostEqual(delta, -400_000)
+        self.assertAlmostEqual(state["cash_php"], 0)
+        self.assertAlmostEqual(state["balance_php"], 100_000)
+        self.assertAlmostEqual(hold["cost_php"], 100_000)
+        self.assertAlmostEqual(hold["usdt"], entry.buy_usdt * 0.2)
+
     def test_hold_buy_waits_then_sells_at_profit_threshold(self):
         buy_snapshot = P2PSnapshot(
             marketplace="Binance",

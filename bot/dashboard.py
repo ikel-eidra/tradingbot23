@@ -591,7 +591,9 @@ class Dashboard:
         controls = tk.Frame(body, bg="#0d1117")
         controls.pack(fill="x", pady=(0, 8))
 
-        self._p2p_capital_php = tk.StringVar(value="500000")
+        saved_p2p_state = self.p2p_paper.state()
+        saved_p2p_capital = self._num(saved_p2p_state.get("starting_php"), 500_000)
+        self._p2p_capital_php = tk.StringVar(value=f"{saved_p2p_capital:.0f}")
         self._p2p_min_profit_pct = tk.StringVar(value="0.10")
         self._p2p_transfer_fee_usdt = tk.StringVar(value="1.0")
         self._p2p_buffer_php = tk.StringVar(value="0")
@@ -671,7 +673,7 @@ class Dashboard:
             ("BEST BUY USDT", self._p2p_buy_var),
             ("BEST SELL USDT", self._p2p_sell_var),
             ("TOP NET PROFIT", self._p2p_top_profit_var),
-            ("500K SWEEP", self._p2p_sweep_profit_var),
+            ("DEPTH SWEEP", self._p2p_sweep_profit_var),
             ("PAPER BAL", self._p2p_paper_balance_var),
             ("CYCLES", self._p2p_paper_cycles_var),
             ("HOLD USDT", self._p2p_hold_usdt_var),
@@ -837,13 +839,21 @@ class Dashboard:
         self._recalculate_p2p_routes(update_status=False)
 
     def _recalculate_p2p_routes(self, update_status: bool = True):
-        if not self._p2p_last_snapshot:
-            if update_status and hasattr(self, "_p2p_status_var"):
-                self._p2p_status_var.set("Load P2P prices before recalculating routes.")
-            return
-
         settings = self._p2p_route_settings()
         if not settings:
+            return
+
+        state, capital_delta = self.p2p_paper.sync_starting_capital(settings.capital_php)
+        self._refresh_p2p_paper_summary(state)
+
+        if not self._p2p_last_snapshot:
+            if update_status and hasattr(self, "_p2p_status_var"):
+                self._p2p_status_var.set(
+                    self._p2p_capital_status(
+                        capital_delta,
+                        "Load P2P prices before recalculating routes.",
+                    )
+                )
             return
 
         self._p2p_routes = build_p2p_routes([self._p2p_last_snapshot], settings=settings)
@@ -858,14 +868,22 @@ class Dashboard:
             self._p2p_top_route_var.set(f"{top.route_label} {top.grade}")
             if update_status:
                 self._p2p_status_var.set(
-                    f"Recalculated {len(self._p2p_routes)} route(s) for "
-                    f"{settings.capital_php:,.0f} PHP capital."
+                    self._p2p_capital_status(
+                        capital_delta,
+                        f"Recalculated {len(self._p2p_routes)} route(s) for "
+                        f"{settings.capital_php:,.0f} PHP capital.",
+                    )
                 )
         else:
             self._p2p_top_profit_var.set("--")
             self._p2p_top_route_var.set("--")
             if update_status:
-                self._p2p_status_var.set("No route meets the current profit filters.")
+                self._p2p_status_var.set(
+                    self._p2p_capital_status(
+                        capital_delta,
+                        "No route meets the current profit filters.",
+                    )
+                )
 
         if self._p2p_auto_paper.get():
             self._execute_p2p_paper_cycle(auto=True)
@@ -950,7 +968,7 @@ class Dashboard:
         settings = self._p2p_route_settings()
         if not settings:
             return
-        state = self.p2p_paper.state(settings.capital_php)
+        state, _ = self.p2p_paper.sync_starting_capital(settings.capital_php)
         if state.get("hold_position"):
             self._p2p_status_var.set("Hold buy skipped: one P2P hold is already open.")
             self._refresh_p2p_paper_summary(state)
@@ -1002,7 +1020,7 @@ class Dashboard:
         settings = self._p2p_route_settings()
         if not settings:
             return
-        state = self.p2p_paper.state(settings.capital_php)
+        state, _ = self.p2p_paper.sync_starting_capital(settings.capital_php)
         if not state.get("hold_position"):
             if not auto:
                 self._p2p_status_var.set("No open P2P hold to evaluate.")
@@ -1040,7 +1058,7 @@ class Dashboard:
         settings = self._p2p_route_settings()
         if not settings:
             return
-        state = self.p2p_paper.state(settings.capital_php)
+        state, _ = self.p2p_paper.sync_starting_capital(settings.capital_php)
         paper_capital = self._num(state.get("cash_php", state.get("balance_php")), settings.capital_php)
         if paper_capital <= 0:
             if not auto:
@@ -1113,6 +1131,12 @@ class Dashboard:
         else:
             self._p2p_hold_usdt_var.set("--")
             self._p2p_hold_pnl_var.set(f"Cash {cash:,.0f}")
+
+    @staticmethod
+    def _p2p_capital_status(delta: float, message: str) -> str:
+        if abs(delta) < 0.01:
+            return message
+        return f"P2P paper capital adjusted {delta:+,.0f} PHP. {message}"
 
     def _log_top_p2p_route(self):
         if not self._p2p_routes:
@@ -1630,6 +1654,7 @@ class Dashboard:
         for item in self.pos_tree.get_children():
             self.pos_tree.delete(item)
         now            = datetime.now(timezone.utc)
+        self.trader.refresh_cross_liquidation_prices()
         open_positions = list(self.trader.get_open_positions())  # snapshot — no race condition
         for pos in open_positions:
             age_h   = (now - pos.entry_time).total_seconds() / 3600
@@ -1641,10 +1666,8 @@ class Dashboard:
                 pnl_str = f"{lev_pnl:+.2f}% ({price_chg*100:+.2f}% price)"
             else:
                 pnl_str = "--"
-            risk_price = getattr(pos, "liquidation_price", None)
-            if not risk_price:
-                risk_price = getattr(pos, "sl_price", None)
-            risk_str = f"${risk_price:.4f}" if risk_price else "--"
+            risk_price = self._num(getattr(pos, "liquidation_price", 0.0), 0.0)
+            risk_str = f"${risk_price:.4f}" if risk_price > 0 else "No near liq"
             self.pos_tree.insert("", "end", values=(
                 pos.symbol,
                 f"${pos.amount_usd:.2f}",
