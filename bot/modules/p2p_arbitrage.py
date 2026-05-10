@@ -101,6 +101,36 @@ class P2PPaperCycle:
     warnings: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class P2PHoldEntry:
+    """A paper buy-only P2P entry that holds USDT inventory."""
+
+    cost_php: float
+    buy_usdt: float
+    avg_buy_price: float
+    warnings: tuple[str, ...]
+    buy_lots: tuple[P2PSweepLot, ...]
+
+
+@dataclass(frozen=True)
+class P2PHoldEvaluation:
+    """Current sell-side mark for an open paper P2P hold."""
+
+    timestamp: str
+    cost_php: float
+    usdt: float
+    sold_usdt: float
+    sell_php: float
+    avg_buy_price: float
+    avg_sell_price: float
+    profit_php: float
+    profit_pct: float
+    target_profit_pct: float
+    exit_ready: bool
+    warnings: tuple[str, ...]
+    sell_lots: tuple[P2PSweepLot, ...]
+
+
 class P2PJournal:
     """Small CSV journal for planned or completed manual P2P cycles."""
 
@@ -168,7 +198,10 @@ class P2PPaperArb:
     def state(self, starting_php: float = 500_000.0) -> dict:
         if self.path.exists():
             try:
-                return json.loads(self.path.read_text(encoding="utf-8"))
+                return self._normalize_state(
+                    json.loads(self.path.read_text(encoding="utf-8")),
+                    starting_php,
+                )
             except json.JSONDecodeError:
                 pass
         return self.reset(starting_php)
@@ -179,8 +212,11 @@ class P2PPaperArb:
             "started_at": now,
             "starting_php": float(starting_php),
             "balance_php": float(starting_php),
+            "cash_php": float(starting_php),
             "realized_profit_php": 0.0,
             "cycles": [],
+            "hold_position": None,
+            "hold_trades": [],
         }
         self._save(state)
         return state
@@ -195,14 +231,16 @@ class P2PPaperArb:
         if sweep.size_php <= 0 or sweep.profit_php <= 0 or sweep.profit_pct < min_profit_pct:
             return state, None
 
-        balance_before = float(state.get("balance_php", starting_php))
-        balance_after = balance_before + sweep.profit_php
+        cash_before = float(state.get("cash_php", state.get("balance_php", starting_php)))
+        if sweep.size_php > cash_before + 0.01:
+            return state, None
+        cash_after = cash_before + sweep.profit_php
         cycle = P2PPaperCycle(
             timestamp=datetime.now(timezone.utc).isoformat(),
             size_php=sweep.size_php,
             profit_php=sweep.profit_php,
             profit_pct=sweep.profit_pct,
-            balance_after_php=balance_after,
+            balance_after_php=cash_after,
             avg_buy_price=sweep.avg_buy_price,
             avg_sell_price=sweep.avg_sell_price,
             warnings=sweep.warnings,
@@ -220,10 +258,110 @@ class P2PPaperArb:
             "warnings": list(cycle.warnings),
         })
         state["cycles"] = cycles[-500:]
-        state["balance_php"] = balance_after
+        state["cash_php"] = cash_after
         state["realized_profit_php"] = float(state.get("realized_profit_php", 0.0)) + sweep.profit_php
+        state["balance_php"] = self._equity_at_cost(state)
         self._save(state)
         return state, cycle
+
+    def open_hold(
+        self,
+        entry: P2PHoldEntry,
+        target_profit_pct: float,
+        starting_php: float = 500_000.0,
+    ) -> tuple[dict, dict | None]:
+        """Open one buy-now/sell-later paper USDT inventory position."""
+        state = self.state(starting_php)
+        if state.get("hold_position"):
+            return state, None
+        cash = float(state.get("cash_php", state.get("balance_php", starting_php)))
+        if entry.cost_php <= 0 or entry.buy_usdt <= 0 or entry.cost_php > cash + 0.01:
+            return state, None
+
+        position = {
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+            "cost_php": entry.cost_php,
+            "usdt": entry.buy_usdt,
+            "avg_buy_price": entry.avg_buy_price,
+            "target_profit_pct": float(target_profit_pct),
+            "warnings": list(entry.warnings),
+            "buy_lots": [lot.__dict__ for lot in entry.buy_lots],
+        }
+        state["cash_php"] = cash - entry.cost_php
+        state["hold_position"] = position
+        state["balance_php"] = self._equity_at_cost(state)
+        self._save(state)
+        return state, position
+
+    def evaluate_hold_exit(
+        self,
+        snapshots: Iterable[P2PSnapshot],
+        settings: P2PRouteSettings | None = None,
+        starting_php: float = 500_000.0,
+    ) -> tuple[dict, P2PHoldEvaluation | None]:
+        """Mark an open hold and close it when the target profit is reached."""
+        settings = settings or P2PRouteSettings()
+        state = self.state(starting_php)
+        position = state.get("hold_position")
+        if not position:
+            return state, None
+
+        evaluation = build_p2p_hold_exit(position, snapshots, settings)
+        if evaluation is None:
+            return state, None
+
+        position["last_checked_at"] = evaluation.timestamp
+        position["last_avg_sell_price"] = evaluation.avg_sell_price
+        position["last_profit_php"] = evaluation.profit_php
+        position["last_profit_pct"] = evaluation.profit_pct
+        position["last_warnings"] = list(evaluation.warnings)
+
+        if evaluation.exit_ready:
+            cash = float(state.get("cash_php", 0.0))
+            cash_after = cash + evaluation.sell_php - settings.local_buffer_php
+            trade = {
+                "opened_at": position.get("opened_at"),
+                "closed_at": evaluation.timestamp,
+                "cost_php": evaluation.cost_php,
+                "usdt": evaluation.usdt,
+                "sell_php": evaluation.sell_php,
+                "profit_php": evaluation.profit_php,
+                "profit_pct": evaluation.profit_pct,
+                "avg_buy_price": evaluation.avg_buy_price,
+                "avg_sell_price": evaluation.avg_sell_price,
+                "target_profit_pct": evaluation.target_profit_pct,
+                "warnings": list(evaluation.warnings),
+            }
+            trades = list(state.get("hold_trades", []))
+            trades.append(trade)
+            state["hold_trades"] = trades[-500:]
+            state["hold_position"] = None
+            state["cash_php"] = cash_after
+            state["realized_profit_php"] = (
+                float(state.get("realized_profit_php", 0.0)) + evaluation.profit_php
+            )
+
+        state["balance_php"] = self._equity_at_cost(state)
+        self._save(state)
+        return state, evaluation
+
+    @staticmethod
+    def _equity_at_cost(state: dict) -> float:
+        cash = float(state.get("cash_php", state.get("balance_php", 0.0)))
+        position = state.get("hold_position") or {}
+        return cash + float(position.get("cost_php", 0.0))
+
+    def _normalize_state(self, state: dict, starting_php: float) -> dict:
+        state.setdefault("started_at", datetime.now(timezone.utc).isoformat())
+        state.setdefault("starting_php", float(starting_php))
+        if "cash_php" not in state:
+            state["cash_php"] = float(state.get("balance_php", starting_php))
+        state.setdefault("realized_profit_php", 0.0)
+        state.setdefault("cycles", [])
+        state.setdefault("hold_position", None)
+        state.setdefault("hold_trades", [])
+        state["balance_php"] = self._equity_at_cost(state)
+        return state
 
     def _save(self, state: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -313,6 +451,94 @@ def build_depth_sweep(
         grade=grade,
         warnings=warnings,
         buy_lots=tuple(buy_lots),
+        sell_lots=tuple(sell_lots),
+    )
+
+
+def build_p2p_hold_entry(
+    snapshots: Iterable[P2PSnapshot],
+    settings: P2PRouteSettings | None = None,
+) -> P2PHoldEntry | None:
+    """Build a buy-only paper entry using the cheapest available P2P sell ads."""
+
+    settings = settings or P2PRouteSettings()
+    buy_ads: list[P2PAd] = []
+    for snapshot in snapshots:
+        buy_ads.extend(snapshot.buy_ads)
+    buy_ads.sort(key=lambda ad: ad.price)
+
+    buy_lots, spent_php, buy_usdt = _sweep_buy_side(buy_ads, settings.capital_php)
+    if spent_php <= 0 or buy_usdt <= 0:
+        return None
+    avg_buy = spent_php / buy_usdt
+    warnings: list[str] = []
+    if spent_php < settings.capital_php * 0.95:
+        warnings.append("partial buy fill")
+    if len(buy_lots) > 1:
+        warnings.append(f"{len(buy_lots)} buy ads")
+    for lot in buy_lots:
+        ad = next((ad for ad in buy_ads if ad.advertiser == lot.advertiser and ad.price == lot.price), None)
+        if ad is not None:
+            rate = _completion_pct(ad.completion_rate)
+            if rate is not None and rate < settings.min_completion_rate * 100:
+                warnings.append("low buy finish")
+                break
+    return P2PHoldEntry(
+        cost_php=spent_php,
+        buy_usdt=buy_usdt,
+        avg_buy_price=avg_buy,
+        warnings=tuple(warnings),
+        buy_lots=tuple(buy_lots),
+    )
+
+
+def build_p2p_hold_exit(
+    position: dict,
+    snapshots: Iterable[P2PSnapshot],
+    settings: P2PRouteSettings | None = None,
+) -> P2PHoldEvaluation | None:
+    """Build a sell-side mark for an open paper P2P hold position."""
+
+    settings = settings or P2PRouteSettings()
+    cost_php = float(position.get("cost_php", 0.0))
+    usdt = float(position.get("usdt", 0.0))
+    if cost_php <= 0 or usdt <= 0:
+        return None
+
+    sell_ads: list[P2PAd] = []
+    for snapshot in snapshots:
+        sell_ads.extend(snapshot.sell_ads)
+    sell_ads.sort(key=lambda ad: ad.price, reverse=True)
+    sell_lots, sold_usdt, sold_php = _sweep_sell_side(sell_ads, usdt)
+    avg_sell = sold_php / sold_usdt if sold_usdt > 0 else 0.0
+    avg_buy = float(position.get("avg_buy_price", cost_php / usdt))
+    profit_php = sold_php - cost_php - settings.local_buffer_php
+    profit_pct = profit_php / cost_php * 100 if cost_php > 0 else 0.0
+    target_profit_pct = float(position.get("target_profit_pct", settings.min_profit_pct))
+    warnings: list[str] = []
+    if sold_usdt < usdt * 0.99:
+        warnings.append("partial sell fill")
+    if profit_php <= 0:
+        warnings.append("no net profit")
+    if profit_pct < target_profit_pct:
+        warnings.append("below target")
+    if len(sell_lots) > 1:
+        warnings.append(f"{len(sell_lots)} sell ads")
+    exit_ready = sold_usdt >= usdt * 0.99 and profit_pct >= target_profit_pct
+
+    return P2PHoldEvaluation(
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        cost_php=cost_php,
+        usdt=usdt,
+        sold_usdt=sold_usdt,
+        sell_php=sold_php,
+        avg_buy_price=avg_buy,
+        avg_sell_price=avg_sell,
+        profit_php=profit_php,
+        profit_pct=profit_pct,
+        target_profit_pct=target_profit_pct,
+        exit_ready=exit_ready,
+        warnings=tuple(warnings),
         sell_lots=tuple(sell_lots),
     )
 
