@@ -3,11 +3,21 @@
 import unittest
 from datetime import datetime, timezone
 
+from bot import config
 from bot.modules.strategy import Strategy
+from tests.support import isolate_data_dir
 
 
 class TestStrategy(unittest.TestCase):
     """Tests for Strategy."""
+
+    def setUp(self):
+        isolate_data_dir(self)
+        config.CAPITAL_USD = 10000
+        config.PER_TRADE_PCT = 0.20
+        config.LEVERAGE = 1
+        config.FUTURES_FEE_PCT = 0.0006
+        config.MONTHLY_CONTRIBUTION_USD = 0
 
     def test_should_refresh_basket_when_empty(self):
         """Should refresh when basket is empty."""

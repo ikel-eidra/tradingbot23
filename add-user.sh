@@ -38,33 +38,17 @@ mkdir -p "${USER_DIR}/data" "${USER_DIR}/logs"
 echo ""
 echo "Setting up ${username}..."
 echo ""
-echo "You need 2 API keys (both are FREE):"
+echo "You need Binance API keys (read-only is enough for paper mode):"
 echo ""
-echo "  1. Binance API key    — https://www.binance.com/en/my/settings/api-management"
-echo "     (Create key with 'Read Only' — no trading permission needed for paper mode)"
-echo ""
-echo "  2. CoinMarketCap key  — https://pro.coinmarketcap.com/signup"
-echo "     (Free tier = 10,000 calls/month, more than enough)"
+echo "  Binance API key — https://www.binance.com/en/my/settings/api-management"
+echo "  Create a key with 'Read Only' — no trading permission needed for paper mode"
 echo ""
 echo "-------------------------------------"
 
 read -rp "Paste ${username}'s BINANCE API KEY: " binance_key
 read -rp "Paste ${username}'s BINANCE API SECRET: " binance_secret
-read -rp "Paste ${username}'s COINMARKETCAP API KEY: " cmc_key
 
 echo ""
-echo "-------------------------------------"
-echo "Choose engine:"
-echo "  1) Spot (default — no leverage, simpler)"
-echo "  2) Futures (paper-only, 2x leverage)"
-read -rp "Engine [1]: " engine_choice
-
-if [[ "$engine_choice" == "2" ]]; then
-    engine="futures"
-else
-    engine="spot"
-fi
-
 read -rp "Starting capital in USD [10000]: " capital
 capital=${capital:-10000}
 
@@ -73,26 +57,25 @@ cat > "$ENV_FILE" << ENVEOF
 # TradingBot23 config for: ${username}
 BINANCE_API_KEY=${binance_key}
 BINANCE_API_SECRET=${binance_secret}
-CMC_API_KEY=${cmc_key}
 
 TRADING_MODE=paper
-ENGINE=${engine}
+ENGINE=futures
 CAPITAL_USD=${capital}
 
 # Strategy defaults
-NET_TP_PCT=0.01
-NET_SL_PCT=0.015
-FEE_PCT=0.001
 MAX_HOLD_DAYS=3
 DIP_THRESHOLD_PCT=0.02
 PER_TRADE_PCT=0.20
 CHECK_INTERVAL_HOURS=1
+MONTHLY_CONTRIBUTION_USD=0
+MONTHLY_CONTRIBUTION_DAY=1
 
-# Futures settings (only if ENGINE=futures)
-LEVERAGE=2
-FUTURES_NET_TP_PCT=0.005
-FUTURES_NET_SL_PCT=0.0075
+# Futures settings
+LEVERAGE=1
+FUTURES_NET_TP_PCT=0.01
+FUTURES_NET_SL_PCT=0.015
 FUTURES_DIP_THRESHOLD_PCT=0.005
+FUTURES_USE_SL=false
 
 LOG_LEVEL=INFO
 ENVEOF

@@ -1,3 +1,3 @@
-"""TradingBot23 - Top 10 Losers Mean-Reversion Spot Trading Bot."""
+"""TradingBot23 - Top Losers Mean-Reversion Futures Paper Trading Bot."""
 
 __version__ = "1.0.0"

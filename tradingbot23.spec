@@ -15,7 +15,6 @@ a = Analysis(
         'bot.setup_wizard',
         'bot.modules',
         'bot.modules.data_fetcher',
-        'bot.modules.trader',
         'bot.modules.futures_trader',
         'bot.modules.strategy',
         'bot.modules.backtester',

@@ -1,6 +1,6 @@
-"""Backtesting engine for the Top 10 Losers strategy.
+"""Backtesting engine for the top losers futures strategy.
 
-Uses Binance historical kline (candlestick) data to simulate the strategy
+Uses Binance USDT-M futures kline (candlestick) data to simulate the strategy
 over a configurable date range.
 """
 
@@ -10,8 +10,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import requests
-from binance.client import Client as BinanceClient
-from binance.exceptions import BinanceAPIException
 
 from bot import config
 
@@ -30,6 +28,9 @@ class BacktestTrade:
     tp_price: float = 0.0
     sl_price: float = 0.0
     quantity: float = 0.0
+    margin_usd: float = 0.0
+    entry_fee_usd: float = 0.0
+    leverage: int = 1
     pnl_pct: float = 0.0
     pnl_usd: float = 0.0
     exit_reason: str = ""  # "tp", "sl", "expired"
@@ -82,12 +83,12 @@ class Backtester:
     """Historical backtesting engine using Binance kline data."""
 
     def __init__(self):
-        self.client = BinanceClient(config.BINANCE_API_KEY, config.BINANCE_API_SECRET)
+        pass
 
     def fetch_daily_klines(
         self, symbol: str, start: datetime, end: datetime
     ) -> list[dict]:
-        """Fetch daily OHLCV data from Binance.
+        """Fetch daily OHLCV data from Binance USDT-M futures.
 
         Args:
             symbol: Coin symbol (e.g., "BTC").
@@ -102,13 +103,20 @@ class Backtester:
         end_ms = int(end.timestamp() * 1000)
 
         try:
-            klines = self.client.get_historical_klines(
-                pair,
-                BinanceClient.KLINE_INTERVAL_1DAY,
-                start_ms,
-                end_ms,
+            resp = requests.get(
+                "https://fapi.binance.com/fapi/v1/klines",
+                params={
+                    "symbol": pair,
+                    "interval": "1d",
+                    "startTime": start_ms,
+                    "endTime": end_ms,
+                    "limit": 1500,
+                },
+                timeout=20,
             )
-        except (BinanceAPIException, requests.RequestException) as e:
+            resp.raise_for_status()
+            klines = resp.json()
+        except (requests.RequestException, ValueError) as e:
             logger.warning("Failed to fetch klines for %s: %s", pair, e)
             return []
 
@@ -214,25 +222,38 @@ class Backtester:
                 if change_pct <= -(config.DIP_THRESHOLD_PCT * 100):
                     # Calculate portfolio value for dynamic sizing
                     open_value = sum(
-                        p.quantity * self._get_price_for_date(candle_data.get(p.symbol, []), day, p.entry_price)
+                        self._position_equity(
+                            p,
+                            self._get_price_for_date(candle_data.get(p.symbol, []), day, p.entry_price),
+                        )
                         for p in open_positions
                     )
                     portfolio_value = cash + open_value
-                    trade_amount = portfolio_value * config.PER_TRADE_PCT
+                    margin = portfolio_value * config.PER_TRADE_PCT
 
-                    if trade_amount > cash:
-                        trade_amount = cash
-                    if trade_amount < 10:
+                    max_margin = cash / (1 + config.LEVERAGE * config.FUTURES_FEE_PCT)
+                    if margin > max_margin:
+                        margin = max_margin
+                    if margin < 10:
                         continue
 
                     entry_price = candle["close"]
-                    # Account for buy fee — actual coins received are less.
-                    gross_qty = trade_amount / entry_price
-                    quantity = gross_qty * (1 - config.FEE_PCT)
-                    tp_price = entry_price * (1 + config.TP_PCT)
-                    sl_price = entry_price * (1 - config.SL_PCT)
+                    leverage = min(config.LEVERAGE, config.MAX_LEVERAGE)
+                    notional = margin * leverage
+                    entry_fee = notional * config.FUTURES_FEE_PCT
+                    quantity = notional / entry_price
 
-                    cash -= trade_amount
+                    fee_drag = 2 * config.FUTURES_FEE_PCT * leverage
+                    funding_drag = config.FUNDING_RATE_DAILY * config.MAX_HOLD_DAYS * leverage
+                    gross_tp_move = (config.FUTURES_NET_TP_PCT + fee_drag + funding_drag) / leverage
+                    gross_sl_move = max(
+                        (config.FUTURES_NET_SL_PCT - fee_drag - funding_drag) / leverage,
+                        0.001,
+                    )
+                    tp_price = entry_price * (1 + gross_tp_move)
+                    sl_price = entry_price * (1 - gross_sl_move) if config.FUTURES_USE_SL else 0.0
+
+                    cash -= margin + entry_fee
 
                     pos = BacktestTrade(
                         symbol=sym,
@@ -241,6 +262,9 @@ class Backtester:
                         tp_price=tp_price,
                         sl_price=sl_price,
                         quantity=quantity,
+                        margin_usd=margin,
+                        entry_fee_usd=entry_fee,
+                        leverage=leverage,
                     )
                     open_positions.append(pos)
 
@@ -262,21 +286,25 @@ class Backtester:
         exit_date: datetime,
         reason: str,
     ) -> float:
-        """Close a backtest trade with fee-aware net PNL. Returns sale proceeds."""
+        """Close a backtest futures trade. Returns released margin plus net PNL."""
         pos.exit_date = exit_date
         pos.exit_price = exit_price
         pos.exit_reason = reason
 
-        # Net PNL: account for both buy fee (paid on entry) and sell fee (paid on exit).
-        entry_cost = pos.entry_price * (1 + config.FEE_PCT)
-        exit_proceeds_per_unit = exit_price * (1 - config.FEE_PCT)
-        pos.pnl_pct = ((exit_proceeds_per_unit - entry_cost) / entry_cost) * 100
-        pos.pnl_usd = (exit_proceeds_per_unit - entry_cost) * pos.quantity
+        exit_notional = exit_price * pos.quantity
+        exit_fee = exit_notional * config.FUTURES_FEE_PCT
+        gross_pnl = (exit_price - pos.entry_price) * pos.quantity
+        pos.pnl_usd = gross_pnl - pos.entry_fee_usd - exit_fee
+        pos.pnl_pct = (pos.pnl_usd / pos.margin_usd) * 100 if pos.margin_usd else 0.0
 
-        # Cash returned to portfolio is gross proceeds minus sell fee.
-        gross_proceeds = pos.quantity * exit_price
-        sell_fee = gross_proceeds * config.FEE_PCT
-        return gross_proceeds - sell_fee
+        return pos.margin_usd + gross_pnl - exit_fee
+
+    def _position_equity(self, pos: "BacktestTrade", current_price: float) -> float:
+        """Estimate open futures position equity at a given mark price."""
+        exit_notional = current_price * pos.quantity
+        exit_fee = exit_notional * config.FUTURES_FEE_PCT
+        gross_pnl = (current_price - pos.entry_price) * pos.quantity
+        return pos.margin_usd + gross_pnl - exit_fee
 
     def _get_candle_for_date(self, candles: list[dict], day: dt.date) -> dict | None:
         """Find candle matching a specific date."""
@@ -340,8 +368,7 @@ class Backtester:
             if basket_override and month_key in basket_override:
                 basket = basket_override[month_key]
             else:
-                # For backtesting without CMC data, use a default top-coin list
-                # In real usage, you'd load historical CMC snapshots
+                # For backtesting without historical snapshots, use a default top-coin list.
                 logger.info(
                     "No basket override for %s — using default top coins. "
                     "For accurate backtests, provide historical snapshots.",

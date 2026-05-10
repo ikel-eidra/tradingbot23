@@ -2,7 +2,6 @@
 
 Usage:
     python -m bot.main --mode paper              # Paper trading (default)
-    python -m bot.main --mode live                # Live trading on Binance
     python -m bot.main --mode backtest --start 2025-04-01 --end 2026-03-31
     python -m bot.main --mode paper --force-snapshot
 """
@@ -19,7 +18,6 @@ from bot.modules.backtester import Backtester
 from bot.modules.data_fetcher import DataFetcher
 from bot.modules.futures_trader import FuturesTrader
 from bot.modules.strategy import Strategy
-from bot.modules.trader import Trader
 from bot.setup_wizard import ensure_setup
 
 # Graceful shutdown
@@ -54,7 +52,7 @@ def setup_logging():
 
 
 def run_trading(force_snapshot: bool = False):
-    """Run the trading bot in live or paper mode."""
+    """Run the futures paper trading loop."""
     setup_logging()
     logger = logging.getLogger(__name__)
 
@@ -66,17 +64,14 @@ def run_trading(force_snapshot: bool = False):
         sys.exit(1)
 
     logger.info("Starting TradingBot23 in %s mode", config.TRADING_MODE.upper())
-    logger.info("Capital: $%.2f | TP: %.1f%% | SL: %.1f%% | Max Hold: %d days",
-                config.CAPITAL_USD, config.TP_PCT * 100, config.SL_PCT * 100, config.MAX_HOLD_DAYS)
+    logger.info("Capital: $%.2f | Futures TP: %.1f%% | Futures SL ref: %.1f%% | Max Hold: %d days",
+                config.CAPITAL_USD, config.FUTURES_NET_TP_PCT * 100,
+                config.FUTURES_NET_SL_PCT * 100, config.MAX_HOLD_DAYS)
     logger.info("Position size: %.0f%% of portfolio (compounding)", config.PER_TRADE_PCT * 100)
+    logger.info("Engine: FUTURES (paper-only, %dx leverage)", config.LEVERAGE)
 
     fetcher = DataFetcher()
-    if config.ENGINE == "futures":
-        logger.info("Engine: FUTURES (paper-only, %dx leverage)", config.LEVERAGE)
-        trader = FuturesTrader()
-    else:
-        logger.info("Engine: SPOT")
-        trader = Trader()
+    trader = FuturesTrader()
     strategy = Strategy(fetcher=fetcher, trader=trader)
 
     if force_snapshot:
@@ -116,7 +111,7 @@ def run_trading(force_snapshot: bool = False):
 
 
 def run_dashboard(force_snapshot: bool = False):
-    """Launch the GUI dashboard with live trading."""
+    """Launch the GUI dashboard with futures paper trading."""
     setup_logging()
     logger = logging.getLogger(__name__)
 
@@ -126,14 +121,11 @@ def run_dashboard(force_snapshot: bool = False):
         logger.error(str(e))
         sys.exit(1)
 
-    logger.info("Launching dashboard in %s mode (%s engine)",
-                config.TRADING_MODE.upper(), config.ENGINE.upper())
+    logger.info("Launching dashboard in %s mode (FUTURES engine)",
+                config.TRADING_MODE.upper())
 
     fetcher = DataFetcher()
-    if config.ENGINE == "futures":
-        trader = FuturesTrader()
-    else:
-        trader = Trader()
+    trader = FuturesTrader()
     strategy = Strategy(fetcher=fetcher, trader=trader)
 
     if force_snapshot:
@@ -153,8 +145,9 @@ def run_backtest(start_str: str, end_str: str):
     end = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
     logger.info("Running backtest from %s to %s", start.date(), end.date())
-    logger.info("Capital: $%.2f | TP: %.1f%% | SL: %.1f%% | Position: %.0f%% (compounding)",
-                config.CAPITAL_USD, config.TP_PCT * 100, config.SL_PCT * 100, config.PER_TRADE_PCT * 100)
+    logger.info("Capital: $%.2f | Futures TP: %.1f%% | Futures SL ref: %.1f%% | Position: %.0f%% (compounding)",
+                config.CAPITAL_USD, config.FUTURES_NET_TP_PCT * 100,
+                config.FUTURES_NET_SL_PCT * 100, config.PER_TRADE_PCT * 100)
 
     backtester = Backtester()
     result = backtester.run(start, end)
@@ -180,10 +173,10 @@ def run_backtest(start_str: str, end_str: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="TradingBot23 - Top 10 Losers Mean-Reversion Spot Trading Bot",
+        description="TradingBot23 - Top Losers Mean-Reversion Futures Paper Trading Bot",
     )
     parser.add_argument(
-        "--mode", choices=["live", "paper", "backtest"], default="paper",
+        "--mode", choices=["paper", "backtest"], default="paper",
         help="Trading mode (default: paper)",
     )
     parser.add_argument(
@@ -195,16 +188,12 @@ def main():
         help="Backtest end date YYYY-MM-DD (default: 2026-03-31)",
     )
     parser.add_argument(
-        "--engine", choices=["spot", "futures"], default=None,
-        help="Trading engine: spot (default) or futures (paper-only)",
-    )
-    parser.add_argument(
         "--force-snapshot", action="store_true",
         help="Force a new monthly snapshot regardless of date",
     )
     parser.add_argument(
         "--dashboard", action="store_true",
-        help="Launch the live GUI dashboard instead of console mode",
+        help="Launch the GUI dashboard instead of console mode",
     )
 
     args = parser.parse_args()
@@ -219,8 +208,7 @@ def main():
 
     # Override config trading mode from CLI
     config.TRADING_MODE = args.mode
-    if args.engine:
-        config.ENGINE = args.engine
+    config.ENGINE = "futures"
 
     if args.mode == "backtest":
         run_backtest(args.start, args.end)

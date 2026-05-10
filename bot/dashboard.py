@@ -82,9 +82,8 @@ class Dashboard:
         top = tk.Frame(self.root, bg="#0d1117", pady=8, padx=15)
         top.pack(fill="x")
 
-        is_paper   = config.TRADING_MODE != "live"
-        mode_text  = "PAPER TRADING" if is_paper else "LIVE TRADING"
-        mode_color = "#3fb950" if is_paper else "#f85149"
+        mode_text  = "FUTURES PAPER"
+        mode_color = "#3fb950"
         self.mode_label = ttk.Label(top, text=f"  {mode_text}  ",
                                     style="Mode.TLabel", foreground=mode_color)
         self.mode_label.pack(side="left")
@@ -142,17 +141,17 @@ class Dashboard:
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True, padx=0, pady=0)
 
-        live_tab     = tk.Frame(nb, bg="#0d1117")
+        open_tab     = tk.Frame(nb, bg="#0d1117")
         charts_tab   = tk.Frame(nb, bg="#0d1117")
         history_tab  = tk.Frame(nb, bg="#0d1117")
         settings_tab = tk.Frame(nb, bg="#0d1117")
-        nb.add(live_tab,     text="  Live  ")
+        nb.add(open_tab,     text="  Open  ")
         nb.add(charts_tab,   text="  Charts  ")
         nb.add(history_tab,  text="  History  ")
         nb.add(settings_tab, text="  Settings  ")
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
-        self._build_live_tab(live_tab)
+        self._build_open_tab(open_tab)
         self._build_charts_tab(charts_tab)
         self._build_history_tab(history_tab)
         self._build_settings_tab(settings_tab)
@@ -164,7 +163,7 @@ class Dashboard:
         ttk.Label(basket_frame, textvariable=self.basket_var, foreground="#8b949e",
                   background="#161b22", font=("Consolas", 9)).pack(anchor="w")
 
-    def _build_live_tab(self, parent):
+    def _build_open_tab(self, parent):
         # Open positions
         pl = tk.Frame(parent, bg="#0d1117")
         pl.pack(fill="x", padx=15, pady=(10, 2))
@@ -175,8 +174,8 @@ class Dashboard:
 
         pos_cols = ("symbol","amount","lev","entry","current","pnl","trigger","tp","sl","age")
         self.pos_tree = ttk.Treeview(pf, columns=pos_cols, show="headings", height=5)
-        pnl_heading = "P&L % (leveraged)" if config.ENGINE == "futures" else "P&L %"
-        risk_heading = "LIQ" if config.ENGINE == "futures" else "SL"
+        pnl_heading = "P&L % (leveraged)"
+        risk_heading = "LIQ"
         for col, heading, width in [
             ("symbol","SYMBOL",70),("amount","AMOUNT $",85),("lev","ENTRY LEV",70),
             ("entry","ENTRY",90),("current","CURRENT",90),
@@ -487,7 +486,7 @@ class Dashboard:
             section("By Engine", by_engine),
             section("By Entry Leverage", by_leverage),
             section("By Exit Reason", by_reason),
-            "Note: This report summarizes local paper/live history from trade_history.csv.",
+            "Note: This report summarizes local paper futures history from trade_history.csv.",
         ])
 
         out = config.DATA_DIR / f"performance_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
@@ -632,10 +631,7 @@ class Dashboard:
 
     @staticmethod
     def _new_trade_setting_text() -> str:
-        text = f"   NEW TRADES: {config.ENGINE.upper()}"
-        if config.ENGINE == "futures":
-            text += f" {config.LEVERAGE}x"
-        return text
+        return f"   NEW TRADES: FUTURES {config.LEVERAGE}x"
 
     @staticmethod
     def _num(value, default: float = 0.0) -> float:
@@ -833,10 +829,7 @@ class Dashboard:
             if current and pos.entry_price > 0:
                 price_chg = (current - pos.entry_price) / pos.entry_price
                 lev_pnl   = price_chg * leverage * 100
-                if config.ENGINE == "futures":
-                    pnl_str = f"{lev_pnl:+.2f}% ({price_chg*100:+.2f}% price)"
-                else:
-                    pnl_str = f"{lev_pnl:+.2f}%"
+                pnl_str = f"{lev_pnl:+.2f}% ({price_chg*100:+.2f}% price)"
             else:
                 pnl_str = "--"
             risk_price = getattr(pos, "liquidation_price", None)
