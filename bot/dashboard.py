@@ -440,6 +440,12 @@ class Dashboard:
         avg_pnl_pct = sum(self._num(r.get("pnl_pct")) for r in rows) / total
         best = max(rows, key=lambda r: self._num(r.get("pnl_pct")))
         worst = min(rows, key=lambda r: self._num(r.get("pnl_pct")))
+        contributed_capital = (
+            self.trader.get_contributed_capital()
+            if hasattr(self.trader, "get_contributed_capital")
+            else config.CAPITAL_USD
+        )
+        portfolio = self.trader.get_portfolio_value()
 
         by_engine = defaultdict(list)
         by_reason = defaultdict(list)
@@ -469,6 +475,8 @@ class Dashboard:
                 f"Trades: {total}\n"
                 f"Wins: {len(wins)} | Losses/breakeven: {len(losses)} | "
                 f"Win rate: {(len(wins) / total * 100):.1f}%\n"
+                f"Contributed capital: ${contributed_capital:,.2f}\n"
+                f"Current portfolio: ${portfolio:,.2f}\n"
                 f"Total P&L: ${total_pnl_usd:+.2f}\n"
                 f"Average P&L per trade: {avg_pnl_pct:+.2f}%\n"
                 f"Best trade: {best.get('symbol', '')} {self._num(best.get('pnl_pct')):+.2f}% "
@@ -546,6 +554,15 @@ class Dashboard:
         row("Per trade (% of portfolio)", lambda p: ttk.Entry(p, textvariable=self._s_per_trade, width=8,
             font=("Consolas",10)), 5)
 
+        # Monthly contribution
+        self._s_monthly_contribution = tk.StringVar(value=str(round(config.MONTHLY_CONTRIBUTION_USD, 2)))
+        row("Monthly contribution ($)", lambda p: ttk.Entry(
+            p, textvariable=self._s_monthly_contribution, width=8, font=("Consolas",10)), 6)
+
+        self._s_monthly_day = tk.StringVar(value=str(config.MONTHLY_CONTRIBUTION_DAY))
+        row("Contribution day", lambda p: ttk.Entry(
+            p, textvariable=self._s_monthly_day, width=8, font=("Consolas",10)), 7)
+
         # Apply button
         self._s_status = tk.StringVar(value="")
         bf = tk.Frame(parent, bg="#0d1117")
@@ -569,11 +586,19 @@ class Dashboard:
             sl_pct    = float(self._s_sl.get()) / 100
             hold_days = int(self._s_hold.get())
             per_trade = float(self._s_per_trade.get()) / 100
+            monthly_contribution = float(self._s_monthly_contribution.get())
+            monthly_day = int(self._s_monthly_day.get())
         except ValueError as e:
             self._s_status.set(f"Error: {e}")
             return
 
         leverage = max(1, min(leverage, config.MAX_LEVERAGE))
+        if monthly_contribution < 0:
+            self._s_status.set("Error: monthly contribution cannot be negative")
+            return
+        if not 1 <= monthly_day <= 31:
+            self._s_status.set("Error: contribution day must be 1-31")
+            return
 
         # Save to .env
         self._write_env({
@@ -584,6 +609,8 @@ class Dashboard:
             "FUTURES_USE_SL":     "true" if sl_on else "false",
             "MAX_HOLD_DAYS":      hold_days,
             "PER_TRADE_PCT":      per_trade,
+            "MONTHLY_CONTRIBUTION_USD": monthly_contribution,
+            "MONTHLY_CONTRIBUTION_DAY": monthly_day,
         })
 
         # Hot-apply to config (new trades pick these up immediately)
@@ -594,12 +621,14 @@ class Dashboard:
         config.FUTURES_USE_SL     = sl_on
         config.MAX_HOLD_DAYS      = hold_days
         config.PER_TRADE_PCT      = per_trade
+        config.MONTHLY_CONTRIBUTION_USD = monthly_contribution
+        config.MONTHLY_CONTRIBUTION_DAY = monthly_day
         self.trader.leverage      = leverage
         self.engine_var.set(self._new_trade_setting_text())
 
         self._s_status.set(
             f"Applied!  Leverage: {leverage}x  |  TP: {tp_pct*100:.2f}%  |  "
-            f"SL: {'ON' if sl_on else 'OFF'}  |  Hold: {hold_days}d")
+            f"SL: {'ON' if sl_on else 'OFF'}  |  Add ${monthly_contribution:.2f}/mo")
 
     @staticmethod
     def _new_trade_setting_text() -> str:
@@ -777,7 +806,11 @@ class Dashboard:
         portfolio      = self.trader.get_portfolio_value()
         cash           = self.trader.cash_balance
         stats          = self.trader.get_stats()
-        initial        = config.CAPITAL_USD
+        initial        = (
+            self.trader.get_contributed_capital()
+            if hasattr(self.trader, "get_contributed_capital")
+            else config.CAPITAL_USD
+        )
         pnl_pct        = ((portfolio - initial) / initial) * 100 if initial > 0 else 0
         open_positions = list(self.trader.get_open_positions())  # snapshot
 

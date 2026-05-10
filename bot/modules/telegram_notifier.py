@@ -104,6 +104,16 @@ def alert_crash_recovery(btc_change: float) -> None:
     )
 
 
+def alert_contribution(amount: float, cash: float, month: str) -> None:
+    mode = config.TRADING_MODE.upper()
+    _send(
+        f"💵 <b>TradingBot23 [{mode}] — MONTHLY CONTRIBUTION</b>\n"
+        f"Month: <b>{month}</b>\n"
+        f"Added: <b>${amount:,.2f}</b>\n"
+        f"Cash balance: <b>${cash:,.2f}</b>"
+    )
+
+
 def alert_summary(portfolio: float, cash: float, open_pos: int,
                   total_trades: int, win_rate: float, total_pnl_usd: float) -> None:
     mode = config.TRADING_MODE.upper()

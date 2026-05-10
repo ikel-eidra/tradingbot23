@@ -294,11 +294,22 @@ class Strategy:
         summary = {
             "timestamp": now.isoformat(),
             "basket_refreshed": False,
+            "cash_contributed": 0.0,
             "dips_found": 0,
             "positions_opened": 0,
             "positions_closed": 0,
             "slots_filled": 0,
         }
+
+        if hasattr(self.trader, "apply_monthly_contribution"):
+            contributed = self.trader.apply_monthly_contribution(now)
+            summary["cash_contributed"] = contributed
+            if contributed:
+                logger.info(
+                    "Monthly paper contribution applied: $%.2f | Cash: $%.2f",
+                    contributed, self.trader.cash_balance,
+                )
+                tg.alert_contribution(contributed, self.trader.cash_balance, now.strftime("%Y-%m"))
 
         # Step 1: Check if we need a new basket
         if self.should_refresh_basket(now):

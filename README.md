@@ -36,7 +36,7 @@ The app has a full GUI with four tabs:
 | **Live** | Open positions with entry price, current price, entry leverage, P&L%, TP, liquidation price, age |
 | **Charts** | Equity curve, trade return distribution, exit breakdown pie, cumulative P&L |
 | **History** | Every trade ever made, loaded from disk, plus exportable performance reports |
-| **Settings** | Change leverage, TP%, SL on/off, capital, max hold days — applies to new trades instantly |
+| **Settings** | Change leverage, TP%, SL on/off, capital, monthly contribution, max hold days — applies to new trades instantly |
 
 ---
 
@@ -130,6 +130,8 @@ All settings live in `.env`. The Settings tab in the GUI lets you change most of
 | `TOP_N_COINS` | `50` | Market cap universe (top 50 recommended) |
 | `TOP_N_LOSERS` | `5` | Basket size (max simultaneous positions) |
 | `PER_TRADE_PCT` | `0.20` | 20% of portfolio per trade |
+| `MONTHLY_CONTRIBUTION_USD` | `0` | Paper cash added once per month; set `100` to simulate adding $100/month |
+| `MONTHLY_CONTRIBUTION_DAY` | `1` | Day of month to apply the paper contribution |
 
 ### Profit / Risk Settings
 
@@ -173,6 +175,8 @@ Every closed trade is appended to `data/trade_history.csv`. This file:
 - Can be summarized from the History tab with **Export Report**
 
 CSV columns: `open_time, close_time, symbol, engine, entry_price, exit_price, amount_usd, notional, leverage, pnl_pct, pnl_usd, funding_paid, reason, entry_change_24h`
+
+Monthly paper contributions are tracked in `data/account_state.json` so restarts do not double-add the same month. Dashboard portfolio P&L uses total contributed capital, not only starting capital, so deposits are not counted as profit.
 
 ---
 

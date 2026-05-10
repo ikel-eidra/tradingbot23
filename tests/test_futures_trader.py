@@ -24,6 +24,8 @@ class TestFuturesTrader(unittest.TestCase):
         config.BREAK_EVEN_TRIGGER_PCT = 0.005
         config.LOSS_COOLDOWN_HOURS = 24
         config.TP_COOLDOWN_HOURS = 1
+        config.MONTHLY_CONTRIBUTION_USD = 0
+        config.MONTHLY_CONTRIBUTION_DAY = 1
         self.trader = FuturesTrader()
 
     def test_leverage_clamp(self):
@@ -48,6 +50,17 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertIsNotNone(pos)
         self.assertLess(pos.margin_used, 100)
         self.assertGreaterEqual(self.trader.cash_balance, 0)
+
+    def test_monthly_contribution_applies_once_per_month(self):
+        config.MONTHLY_CONTRIBUTION_USD = 100
+        config.MONTHLY_CONTRIBUTION_DAY = 1
+        may_first = datetime(2026, 5, 1, tzinfo=timezone.utc)
+
+        self.assertEqual(self.trader.apply_monthly_contribution(may_first), 100)
+        self.assertAlmostEqual(self.trader.cash_balance, 10100)
+        self.assertEqual(self.trader.apply_monthly_contribution(may_first), 0)
+        self.assertAlmostEqual(self.trader.cash_balance, 10100)
+        self.assertAlmostEqual(self.trader.get_contributed_capital(), 10100)
 
     def test_no_duplicate(self):
         with patch.object(self.trader, "get_current_price", return_value=100.0):

@@ -30,6 +30,8 @@ TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 # --- Capital & Position Sizing ---
 CAPITAL_USD = float(os.getenv("CAPITAL_USD", "10000"))
 PER_TRADE_PCT = float(os.getenv("PER_TRADE_PCT", "0.20"))  # 20% of current balance per coin
+MONTHLY_CONTRIBUTION_USD = float(os.getenv("MONTHLY_CONTRIBUTION_USD", "0"))
+MONTHLY_CONTRIBUTION_DAY = int(os.getenv("MONTHLY_CONTRIBUTION_DAY", "1"))
 
 # --- Strategy Parameters ---
 # NET take profit target (after fees). Default = 1% net profit per trade.

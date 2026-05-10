@@ -23,6 +23,7 @@ from binance.client import Client as BinanceClient
 from binance.exceptions import BinanceAPIException
 
 from bot import config
+from bot.modules import accounting
 from bot.modules import telegram_notifier as tg
 
 logger = logging.getLogger(__name__)
@@ -443,6 +444,7 @@ class FuturesTrader:
     def _load_trade_history(self) -> None:
         path = _history_csv()
         if not path.exists():
+            self.cash_balance = accounting.total_contributed_capital()
             return
         loaded = 0
         with open(path, "r", encoding="utf-8") as f:
@@ -475,13 +477,23 @@ class FuturesTrader:
                     loaded += 1
                 except Exception:
                     logger.debug("Skipped unreadable history row", exc_info=True)
+        past_pnl = sum(p.pnl_usd for p in self.positions)
+        self.cash_balance = accounting.total_contributed_capital() + past_pnl
         if loaded:
-            past_pnl = sum(p.pnl_usd for p in self.positions)
-            self.cash_balance = config.CAPITAL_USD + past_pnl
             logger.info(
                 "Loaded %d closed trades | Past P&L: $%+.2f | Restored balance: $%.2f",
                 loaded, past_pnl, self.cash_balance,
             )
+
+    def apply_monthly_contribution(self, now: datetime | None = None) -> float:
+        """Apply the configured monthly paper contribution once per month."""
+        self.cash_balance, amount = accounting.apply_monthly_contribution(self.cash_balance, now)
+        if amount:
+            self._save_open_positions()
+        return amount
+
+    def get_contributed_capital(self) -> float:
+        return accounting.total_contributed_capital()
 
     def arm_crash_sl(self) -> int:
         """Set emergency SL on all open positions at current_price × (1 - CRASH_SL_PCT).

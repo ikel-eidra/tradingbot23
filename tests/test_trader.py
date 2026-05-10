@@ -26,12 +26,26 @@ class TestTrader(unittest.TestCase):
         config.BREAK_EVEN_TRIGGER_PCT = 0.005
         config.LOSS_COOLDOWN_HOURS = 24
         config.TP_COOLDOWN_HOURS = 1
+        config.MONTHLY_CONTRIBUTION_USD = 0
+        config.MONTHLY_CONTRIBUTION_DAY = 1
         self.trader = Trader()
 
     def test_portfolio_value_initial(self):
         """Initial portfolio value should equal capital."""
         # Mock get_current_price since we have no open positions
         self.assertEqual(self.trader.get_portfolio_value(), 10000)
+
+    def test_monthly_contribution_applies_once_per_month(self):
+        """Monthly paper contribution should not double-apply in one month."""
+        config.MONTHLY_CONTRIBUTION_USD = 100
+        config.MONTHLY_CONTRIBUTION_DAY = 1
+        may_first = datetime(2026, 5, 1, tzinfo=timezone.utc)
+
+        self.assertEqual(self.trader.apply_monthly_contribution(may_first), 100)
+        self.assertAlmostEqual(self.trader.cash_balance, 10100)
+        self.assertEqual(self.trader.apply_monthly_contribution(may_first), 0)
+        self.assertAlmostEqual(self.trader.cash_balance, 10100)
+        self.assertAlmostEqual(self.trader.get_contributed_capital(), 10100)
 
     def test_cash_balance_after_paper_buy(self):
         """Cash should decrease by trade amount + Binance fee."""

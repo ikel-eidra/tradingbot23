@@ -14,6 +14,7 @@ from binance.client import Client as BinanceClient
 from binance.exceptions import BinanceAPIException
 
 from bot import config
+from bot.modules import accounting
 from bot.modules.futures_trader import _append_trade_csv
 
 logger = logging.getLogger(__name__)
@@ -441,6 +442,7 @@ class Trader:
         from bot.modules.futures_trader import _history_csv  # noqa: PLC0415
         path = _history_csv()
         if not path.exists():
+            self.cash_balance = accounting.total_contributed_capital()
             return
         loaded = 0
         with open(path, "r", encoding="utf-8") as f:
@@ -468,13 +470,23 @@ class Trader:
                     loaded += 1
                 except Exception:
                     logger.debug("Skipped unreadable history row", exc_info=True)
+        past_pnl = sum(p.pnl_usd for p in self.positions)
+        self.cash_balance = accounting.total_contributed_capital() + past_pnl
         if loaded:
-            past_pnl = sum(p.pnl_usd for p in self.positions)
-            self.cash_balance = config.CAPITAL_USD + past_pnl
             logger.info(
                 "Loaded %d closed spot trades | Past P&L: $%+.2f | Restored balance: $%.2f",
                 loaded, past_pnl, self.cash_balance,
             )
+
+    def apply_monthly_contribution(self, now: datetime | None = None) -> float:
+        """Apply the configured monthly paper contribution once per month."""
+        if not self.paper_mode:
+            return 0.0
+        self.cash_balance, amount = accounting.apply_monthly_contribution(self.cash_balance, now)
+        return amount
+
+    def get_contributed_capital(self) -> float:
+        return accounting.total_contributed_capital()
 
     def get_open_positions(self) -> list[Position]:
         """Return all currently open positions."""
