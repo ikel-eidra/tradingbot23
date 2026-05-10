@@ -221,6 +221,37 @@ class P2PPaperArb:
         self._save(state)
         return state
 
+    def sync_starting_capital(self, starting_php: float) -> tuple[dict, float]:
+        """Apply a paper bankroll change without requiring a full reset.
+
+        Cash absorbs the change first. If the bankroll is lowered while a hold
+        is open and free cash is not enough, the open paper hold is scaled down
+        proportionally so displayed equity follows the configured capital.
+        """
+        starting_php = float(starting_php)
+        if starting_php <= 0:
+            raise ValueError("starting PHP capital must be positive")
+
+        state = self.state(starting_php)
+        previous = float(state.get("starting_php", starting_php))
+        delta = starting_php - previous
+        state["starting_php"] = starting_php
+
+        if abs(delta) < 0.01:
+            state["balance_php"] = self._equity_at_cost(state)
+            self._save(state)
+            return state, 0.0
+
+        cash = float(state.get("cash_php", state.get("balance_php", previous)))
+        if delta > 0:
+            state["cash_php"] = cash + delta
+        else:
+            state["cash_php"] = self._withdraw_equity_from_state(state, -delta, cash)
+
+        state["balance_php"] = self._equity_at_cost(state)
+        self._save(state)
+        return state, delta
+
     def execute_if_profitable(
         self,
         sweep: P2PDepthSweep,
@@ -350,6 +381,44 @@ class P2PPaperArb:
         cash = float(state.get("cash_php", state.get("balance_php", 0.0)))
         position = state.get("hold_position") or {}
         return cash + float(position.get("cost_php", 0.0))
+
+    def _withdraw_equity_from_state(self, state: dict, amount_php: float, cash_php: float) -> float:
+        if amount_php <= cash_php:
+            return cash_php - amount_php
+
+        remainder = amount_php - cash_php
+        position = state.get("hold_position")
+        if not position:
+            return 0.0
+
+        cost_php = float(position.get("cost_php", 0.0))
+        if cost_php <= 0:
+            state["hold_position"] = None
+            return 0.0
+
+        new_cost = max(0.0, cost_php - remainder)
+        if new_cost <= 0.01:
+            state["hold_position"] = None
+            return 0.0
+
+        self._scale_hold_position(position, new_cost / cost_php)
+        return 0.0
+
+    @staticmethod
+    def _scale_hold_position(position: dict, ratio: float) -> None:
+        position["cost_php"] = float(position.get("cost_php", 0.0)) * ratio
+        position["usdt"] = float(position.get("usdt", 0.0)) * ratio
+        for lot in position.get("buy_lots", []):
+            lot["php"] = float(lot.get("php", 0.0)) * ratio
+            lot["usdt"] = float(lot.get("usdt", 0.0)) * ratio
+        for stale_key in (
+            "last_checked_at",
+            "last_avg_sell_price",
+            "last_profit_php",
+            "last_profit_pct",
+            "last_warnings",
+        ):
+            position.pop(stale_key, None)
 
     def _normalize_state(self, state: dict, starting_php: float) -> dict:
         state.setdefault("started_at", datetime.now(timezone.utc).isoformat())
