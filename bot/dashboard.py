@@ -543,6 +543,24 @@ class Dashboard:
         grid = tk.Frame(settings_panel, bg="#0d1117")
         grid.pack(fill="x")
 
+        def field(parent, var, width):
+            return tk.Entry(
+                parent,
+                textvariable=var,
+                width=width,
+                font=("Consolas", 10),
+                bg="#f0f6fc",
+                fg="#0d1117",
+                insertbackground="#0d1117",
+                selectbackground="#58a6ff",
+                selectforeground="#0d1117",
+                relief="solid",
+                bd=1,
+                highlightthickness=1,
+                highlightbackground="#8b949e",
+                highlightcolor="#58a6ff",
+            )
+
         def row(label, widget_factory, r):
             ttk.Label(grid, text=label, foreground="#8b949e", background="#0d1117",
                       font=("Consolas", 9), width=22).grid(row=r, column=0, sticky="w", pady=4)
@@ -552,25 +570,39 @@ class Dashboard:
 
         # Capital
         self._s_capital = tk.StringVar(value=str(int(config.CAPITAL_USD)))
-        row("Capital (USD)", lambda p: ttk.Entry(p, textvariable=self._s_capital, width=10,
-            font=("Consolas",10), style="Settings.TEntry"), 0)
+        row("Capital (USD)", lambda p: field(p, self._s_capital, 10), 0)
 
         # Leverage
-        self._s_leverage = tk.StringVar(value=f"{config.LEVERAGE}x")
-        row("Leverage", lambda p: ttk.Combobox(
-            p,
+        self._s_leverage = tk.IntVar(value=config.LEVERAGE)
+        lev_frame = tk.Frame(grid, bg="#0d1117")
+        lev_frame.grid(row=1, column=1, sticky="w", padx=8, pady=4)
+        ttk.Label(grid, text="Leverage", foreground="#8b949e", background="#0d1117",
+                  font=("Consolas", 9), width=22).grid(row=1, column=0, sticky="w", pady=4)
+        tk.Spinbox(
+            lev_frame,
+            from_=1,
+            to=config.MAX_LEVERAGE,
             textvariable=self._s_leverage,
-            values=[f"{lv}x" for lv in range(1, config.MAX_LEVERAGE + 1)],
-            state="readonly",
-            width=6,
+            width=5,
             font=("Consolas", 10),
-            style="Settings.TCombobox",
-        ), 1)
+            bg="#f0f6fc",
+            fg="#0d1117",
+            buttonbackground="#c9d1d9",
+            insertbackground="#0d1117",
+            selectbackground="#58a6ff",
+            selectforeground="#0d1117",
+            relief="solid",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground="#8b949e",
+            highlightcolor="#58a6ff",
+        ).pack(side="left")
+        ttk.Label(lev_frame, text="x", foreground="#8b949e", background="#0d1117",
+                  font=("Consolas", 9)).pack(side="left", padx=(6, 0))
 
         # TP %
         self._s_tp = tk.StringVar(value=str(round(config.FUTURES_NET_TP_PCT * 100, 2)))
-        row("TP target (% net)", lambda p: ttk.Entry(p, textvariable=self._s_tp, width=8,
-            font=("Consolas",10), style="Settings.TEntry"), 2)
+        row("TP target (% net)", lambda p: field(p, self._s_tp, 8), 2)
 
         # SL enable + %
         self._s_sl_enabled = tk.BooleanVar(value=config.FUTURES_USE_SL)
@@ -580,31 +612,24 @@ class Dashboard:
         ttk.Label(grid, text="Stop Loss", foreground="#8b949e", background="#0d1117",
                   font=("Consolas", 9), width=22).grid(row=3, column=0, sticky="w", pady=4)
         ttk.Checkbutton(sl_frame, text="Enable", variable=self._s_sl_enabled).pack(side="left")
-        ttk.Entry(sl_frame, textvariable=self._s_sl, width=8,
-                  font=("Consolas",10), style="Settings.TEntry").pack(side="left", padx=8)
+        field(sl_frame, self._s_sl, 8).pack(side="left", padx=8)
         ttk.Label(sl_frame, text="% net", foreground="#8b949e", background="#0d1117",
                   font=("Consolas",9)).pack(side="left")
 
         # Max hold days
         self._s_hold = tk.StringVar(value=str(config.MAX_HOLD_DAYS))
-        row("Max hold (days)", lambda p: ttk.Entry(p, textvariable=self._s_hold, width=8,
-            font=("Consolas",10), style="Settings.TEntry"), 4)
+        row("Max hold (days)", lambda p: field(p, self._s_hold, 8), 4)
 
         # Per trade %
         self._s_per_trade = tk.StringVar(value=str(round(config.PER_TRADE_PCT * 100, 0)))
-        row("Per trade (% of portfolio)", lambda p: ttk.Entry(p, textvariable=self._s_per_trade, width=8,
-            font=("Consolas",10), style="Settings.TEntry"), 5)
+        row("Per trade (% of portfolio)", lambda p: field(p, self._s_per_trade, 8), 5)
 
         # Monthly contribution
         self._s_monthly_contribution = tk.StringVar(value=str(round(config.MONTHLY_CONTRIBUTION_USD, 2)))
-        row("Monthly contribution ($)", lambda p: ttk.Entry(
-            p, textvariable=self._s_monthly_contribution, width=8,
-            font=("Consolas",10), style="Settings.TEntry"), 6)
+        row("Monthly contribution ($)", lambda p: field(p, self._s_monthly_contribution, 8), 6)
 
         self._s_monthly_day = tk.StringVar(value=str(config.MONTHLY_CONTRIBUTION_DAY))
-        row("Contribution day", lambda p: ttk.Entry(
-            p, textvariable=self._s_monthly_day, width=8,
-            font=("Consolas",10), style="Settings.TEntry"), 7)
+        row("Contribution day", lambda p: field(p, self._s_monthly_day, 8), 7)
 
         # Apply button
         self._s_status = tk.StringVar(value="")
@@ -651,7 +676,7 @@ class Dashboard:
     def _apply_settings(self):
         try:
             capital   = float(self._s_capital.get())
-            leverage  = int(str(self._s_leverage.get()).lower().replace("x", "").strip())
+            leverage  = int(self._s_leverage.get())
             tp_pct    = float(self._s_tp.get()) / 100
             sl_on     = self._s_sl_enabled.get()
             sl_pct    = float(self._s_sl.get()) / 100
@@ -664,7 +689,7 @@ class Dashboard:
             return
 
         leverage = max(1, min(leverage, config.MAX_LEVERAGE))
-        self._s_leverage.set(f"{leverage}x")
+        self._s_leverage.set(leverage)
         if monthly_contribution < 0:
             self._s_status.set("Error: monthly contribution cannot be negative")
             return
