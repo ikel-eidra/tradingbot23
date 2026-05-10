@@ -69,6 +69,7 @@ SNAPSHOT_DAY = int(os.getenv("SNAPSHOT_DAY", "1"))  # Day of month
 CHECK_INTERVAL_HOURS = float(os.getenv("CHECK_INTERVAL_HOURS", "1"))
 POSITION_CHECK_MINS = float(os.getenv("POSITION_CHECK_MINS", "5"))  # how often to check TP/SL
 AUTO_START_FUTURES = os.getenv("AUTO_START_FUTURES", "false").lower() == "true"
+SETTINGS_CONFIRMED = os.getenv("SETTINGS_CONFIRMED", "false").lower() == "true"
 
 # --- Engine selection ---
 # Futures-only. Spot trading is intentionally disabled; it needs two exchange

@@ -42,7 +42,8 @@ class Dashboard:
         self.strategy = strategy
         self.trader   = strategy.trader
         self._running      = True
-        self._paused       = not config.AUTO_START_FUTURES
+        self._settings_confirmed = config.SETTINGS_CONFIRMED
+        self._paused       = (not config.AUTO_START_FUTURES) or (not self._settings_confirmed)
         self._force_event  = threading.Event()
         self._cycle_thread = None
 
@@ -159,11 +160,12 @@ class Dashboard:
         self.run_btn.pack(side="left", padx=(0, 6))
         self.pause_btn.pack(side="left", padx=(0, 12))
 
-        initial_status = (
-            "Paused on launch. Press Resume to start futures paper trading."
-            if self._paused
-            else "Starting up..."
-        )
+        if not self._settings_confirmed:
+            initial_status = "First run: review Settings and click Apply Settings before trading."
+        elif self._paused:
+            initial_status = "Paused on launch. Press Resume to start futures paper trading."
+        else:
+            initial_status = "Starting up..."
         self.status_var = tk.StringVar(value=initial_status)
         ttk.Label(ctrl, textvariable=self.status_var, foreground="#8b949e",
                   background="#161b22", font=("Consolas", 9)).pack(side="left")
@@ -204,6 +206,7 @@ class Dashboard:
         history_tab  = tk.Frame(nb, bg="#0d1117")
         p2p_tab      = tk.Frame(nb, bg="#0d1117")
         settings_tab = tk.Frame(nb, bg="#0d1117")
+        self.settings_tab = settings_tab
         nb.add(open_tab,     text="  Open  ")
         nb.add(charts_tab,   text="  Charts  ")
         nb.add(history_tab,  text="  History  ")
@@ -216,6 +219,9 @@ class Dashboard:
         self._build_history_tab(history_tab)
         self._build_p2p_tab(p2p_tab)
         self._build_settings_tab(settings_tab)
+        if not self._settings_confirmed:
+            nb.select(settings_tab)
+            self.status_var.set("First run: review Settings and click Apply Settings before trading.")
 
         # ── Bottom bar ──
         basket_frame = tk.Frame(self.root, bg="#161b22", padx=15, pady=5)
@@ -1138,7 +1144,8 @@ class Dashboard:
         ttk.Checkbutton(auto_frame, text="Enable on launch", variable=self._s_auto_start).pack(side="left")
 
         # Apply button
-        self._s_status = tk.StringVar(value="")
+        setup_msg = "" if self._settings_confirmed else "First run: review these values, then click Apply Settings."
+        self._s_status = tk.StringVar(value=setup_msg)
         bf = tk.Frame(settings_panel, bg="#0d1117")
         bf.pack(fill="x", pady=12)
         ttk.Button(bf, text="Apply Settings", style="Btn.TButton",
@@ -1216,6 +1223,7 @@ class Dashboard:
             "MONTHLY_CONTRIBUTION_USD": monthly_contribution,
             "MONTHLY_CONTRIBUTION_DAY": monthly_day,
             "AUTO_START_FUTURES": "true" if auto_start else "false",
+            "SETTINGS_CONFIRMED": "true",
         })
 
         # Hot-apply to config (new trades pick these up immediately)
@@ -1229,6 +1237,8 @@ class Dashboard:
         config.MONTHLY_CONTRIBUTION_USD = monthly_contribution
         config.MONTHLY_CONTRIBUTION_DAY = monthly_day
         config.AUTO_START_FUTURES = auto_start
+        config.SETTINGS_CONFIRMED = True
+        self._settings_confirmed = True
         self.trader.leverage      = leverage
         self.engine_var.set(self._new_trade_setting_text())
 
@@ -1282,7 +1292,14 @@ class Dashboard:
 
     # ── Button handlers ────────────────────────────────────────────────────────
 
+    def _require_settings_confirmation(self, message):
+        self.notebook.select(self.settings_tab)
+        self.status_var.set(message)
+
     def _on_run_now(self):
+        if not self._settings_confirmed:
+            self._require_settings_confirmation("Review Settings and click Apply Settings before running futures.")
+            return
         if self._paused:
             self._paused = False
             self.pause_btn.config(text="Pause")
@@ -1290,6 +1307,9 @@ class Dashboard:
         self.status_var.set("Running cycle now...")
 
     def _on_pause_resume(self):
+        if not self._settings_confirmed:
+            self._require_settings_confirmation("Review Settings and click Apply Settings before starting futures.")
+            return
         self._paused = not self._paused
         if self._paused:
             self.pause_btn.config(text="Resume")
@@ -1308,7 +1328,7 @@ class Dashboard:
     def _trading_loop(self):
         from bot.modules import telegram_notifier as tg
         now = datetime.now(timezone.utc)
-        if self.strategy.should_refresh_basket(now):
+        if self._settings_confirmed and self.strategy.should_refresh_basket(now):
             try:
                 self.strategy.refresh_basket(now)
             except Exception:
@@ -1405,6 +1425,9 @@ class Dashboard:
             text=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"))
 
     def _update_status(self):
+        if not self._settings_confirmed:
+            self.status_var.set("First run: review Settings and click Apply Settings before trading.")
+            return
         if self._paused:
             self.status_var.set("Paused. Press Resume to start futures paper trading.")
             return

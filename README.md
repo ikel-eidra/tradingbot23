@@ -146,6 +146,7 @@ All settings live in `.env`. The Settings tab in the GUI lets you change most of
 | `MAX_HOLD_DAYS` | `3` | Auto-close after N days |
 | `DIP_THRESHOLD_PCT` | `0.02` | Entry trigger: −2% 24h change |
 | `AUTO_START_FUTURES` | `false` | New installs open paused so futures paper trades do not auto-open until Resume is pressed |
+| `SETTINGS_CONFIRMED` | `false` | First-run guard; app opens Settings first until Apply Settings is clicked |
 | `BREAK_EVEN_TRIGGER_PCT` | `0.005` | Slide SL to break-even after +0.5% move |
 | `LOSS_COOLDOWN_HOURS` | `24` | Hours to skip a coin after SL hit |
 | `TP_COOLDOWN_HOURS` | `1` | Hours to skip a coin after TP hit |
