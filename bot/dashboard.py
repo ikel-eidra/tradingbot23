@@ -21,9 +21,12 @@ from bot import config
 from bot.modules import accounting
 from bot.modules.futures_trader import _history_csv
 from bot.modules.p2p_arbitrage import (
+    P2PDepthSweep,
     P2PJournal,
+    P2PPaperArb,
     P2PRoute,
     P2PRouteSettings,
+    build_depth_sweep,
     build_p2p_routes,
 )
 from bot.modules.p2p_monitor import P2PMonitor, P2PSnapshot
@@ -39,7 +42,7 @@ class Dashboard:
         self.strategy = strategy
         self.trader   = strategy.trader
         self._running      = True
-        self._paused       = False
+        self._paused       = not config.AUTO_START_FUTURES
         self._force_event  = threading.Event()
         self._cycle_thread = None
 
@@ -48,9 +51,11 @@ class Dashboard:
         self._next_cycle_ts:      float = 0.0
         self.p2p_monitor = P2PMonitor(asset="USDT", fiat="PHP")
         self.p2p_journal = P2PJournal()
+        self.p2p_paper = P2PPaperArb()
         self._p2p_refreshing = False
         self._p2p_last_snapshot: P2PSnapshot | None = None
         self._p2p_routes: list[P2PRoute] = []
+        self._p2p_sweep: P2PDepthSweep | None = None
         self._p2p_next_refresh_ts = 0.0
 
         # Equity history: list of (datetime, portfolio_value)
@@ -149,11 +154,17 @@ class Dashboard:
         ctrl.pack(fill="x")
 
         self.run_btn   = ttk.Button(ctrl, text="Run Now",    style="Btn.TButton", command=self._on_run_now)
-        self.pause_btn = ttk.Button(ctrl, text="Pause",      style="Btn.TButton", command=self._on_pause_resume)
+        pause_text = "Resume" if self._paused else "Pause"
+        self.pause_btn = ttk.Button(ctrl, text=pause_text,    style="Btn.TButton", command=self._on_pause_resume)
         self.run_btn.pack(side="left", padx=(0, 6))
         self.pause_btn.pack(side="left", padx=(0, 12))
 
-        self.status_var = tk.StringVar(value="Starting up...")
+        initial_status = (
+            "Paused on launch. Press Resume to start futures paper trading."
+            if self._paused
+            else "Starting up..."
+        )
+        self.status_var = tk.StringVar(value=initial_status)
         ttk.Label(ctrl, textvariable=self.status_var, foreground="#8b949e",
                   background="#161b22", font=("Consolas", 9)).pack(side="left")
 
@@ -557,6 +568,10 @@ class Dashboard:
 
         ttk.Label(top, text="USDT/PHP P2P CYCLE COMMAND CENTER", style="Header.TLabel",
                   background="#0d1117").pack(side="left")
+        ttk.Button(top, text="Reset Paper", style="Btn.TButton",
+                   command=self._reset_p2p_paper).pack(side="right", padx=(6, 0))
+        ttk.Button(top, text="Paper Cycle Now", style="Btn.TButton",
+                   command=self._paper_cycle_now).pack(side="right", padx=(6, 0))
         ttk.Button(top, text="Log Top Route", style="Btn.TButton",
                    command=self._log_top_p2p_route).pack(side="right", padx=(6, 0))
         ttk.Button(top, text="Refresh", style="Btn.TButton",
@@ -569,6 +584,7 @@ class Dashboard:
         self._p2p_min_profit_pct = tk.StringVar(value="0.10")
         self._p2p_transfer_fee_usdt = tk.StringVar(value="1.0")
         self._p2p_buffer_php = tk.StringVar(value="0")
+        self._p2p_auto_paper = tk.BooleanVar(value=False)
 
         for label_text, var, width in [
             ("Capital PHP", self._p2p_capital_php, 10),
@@ -599,6 +615,17 @@ class Dashboard:
 
         ttk.Button(controls, text="Recalculate", style="Btn.TButton",
                    command=self._recalculate_p2p_routes).pack(side="left", padx=(0, 12), pady=(13, 0))
+        tk.Checkbutton(
+            controls,
+            text="Auto Paper",
+            variable=self._p2p_auto_paper,
+            bg="#0d1117",
+            fg="#c9d1d9",
+            selectcolor="#161b22",
+            activebackground="#0d1117",
+            activeforeground="#58a6ff",
+            font=("Consolas", 9),
+        ).pack(side="left", pady=(13, 0))
 
         self._p2p_status_var = tk.StringVar(value="Open this tab or press Refresh to load prices.")
         ttk.Label(body, textvariable=self._p2p_status_var, foreground="#8b949e",
@@ -611,12 +638,17 @@ class Dashboard:
         self._p2p_sell_var = tk.StringVar(value="--")
         self._p2p_top_profit_var = tk.StringVar(value="--")
         self._p2p_top_route_var = tk.StringVar(value="--")
+        self._p2p_sweep_profit_var = tk.StringVar(value="--")
+        self._p2p_paper_balance_var = tk.StringVar(value="--")
+        self._p2p_paper_cycles_var = tk.StringVar(value="--")
 
         for label_text, var in [
             ("BEST BUY USDT", self._p2p_buy_var),
             ("BEST SELL USDT", self._p2p_sell_var),
             ("TOP NET PROFIT", self._p2p_top_profit_var),
-            ("TOP ROUTE", self._p2p_top_route_var),
+            ("500K SWEEP", self._p2p_sweep_profit_var),
+            ("PAPER BAL", self._p2p_paper_balance_var),
+            ("CYCLES", self._p2p_paper_cycles_var),
         ]:
             card = tk.Frame(summary, bg="#161b22",
                             highlightbackground="#30363d", highlightthickness=1)
@@ -625,6 +657,7 @@ class Dashboard:
                       font=("Consolas", 8)).pack(anchor="w")
             ttk.Label(card, textvariable=var, foreground="#58a6ff", background="#161b22",
                       font=("Consolas", 14, "bold")).pack(anchor="w")
+        self._refresh_p2p_paper_summary()
 
         route_section = tk.Frame(body, bg="#0d1117")
         route_section.pack(fill="x", expand=False, pady=(0, 6))
@@ -783,7 +816,9 @@ class Dashboard:
             return
 
         self._p2p_routes = build_p2p_routes([self._p2p_last_snapshot], settings=settings)
+        self._p2p_sweep = build_depth_sweep([self._p2p_last_snapshot], settings=settings)
         self._fill_p2p_route_tree(self._p2p_routes)
+        self._update_p2p_sweep_summary()
 
         if self._p2p_routes:
             top = self._p2p_routes[0]
@@ -799,6 +834,9 @@ class Dashboard:
             self._p2p_top_route_var.set("--")
             if update_status:
                 self._p2p_status_var.set("No route meets the current profit filters.")
+
+        if self._p2p_auto_paper.get():
+            self._execute_p2p_paper_cycle(auto=True)
 
     def _p2p_route_settings(self) -> P2PRouteSettings | None:
         try:
@@ -829,6 +867,19 @@ class Dashboard:
         for item in self.p2p_route_tree.get_children():
             self.p2p_route_tree.delete(item)
 
+        if self._p2p_sweep:
+            warnings = "; ".join(self._p2p_sweep.warnings) if self._p2p_sweep.warnings else "ok"
+            self.p2p_route_tree.insert("", "end", tags=(self._p2p_sweep.grade,), values=(
+                "DEPTH SWEEP",
+                f"{self._p2p_sweep.size_php:,.0f}",
+                f"avg {self._p2p_sweep.avg_buy_price:,.2f}",
+                f"avg {self._p2p_sweep.avg_sell_price:,.2f}",
+                f"{self._p2p_sweep.profit_php:+,.0f}",
+                f"{self._p2p_sweep.profit_pct:+.3f}%",
+                self._p2p_sweep.grade,
+                self._clip_text(warnings, 34),
+            ))
+
         for route in routes:
             warnings = "; ".join(route.warnings) if route.warnings else "ok"
             self.p2p_route_tree.insert("", "end", tags=(route.grade,), values=(
@@ -841,6 +892,82 @@ class Dashboard:
                 route.grade,
                 self._clip_text(warnings, 34),
             ))
+
+    def _update_p2p_sweep_summary(self):
+        if not self._p2p_sweep:
+            self._p2p_sweep_profit_var.set("--")
+            return
+        sweep = self._p2p_sweep
+        self._p2p_sweep_profit_var.set(f"{sweep.profit_php:+,.0f} PHP")
+
+    def _paper_cycle_now(self):
+        if not self._p2p_last_snapshot:
+            self._refresh_p2p()
+            self._p2p_status_var.set("Loading prices first; press Paper Cycle Now again after refresh.")
+            return
+        self._recalculate_p2p_routes(update_status=False)
+        self._execute_p2p_paper_cycle(auto=False)
+
+    def _execute_p2p_paper_cycle(self, auto: bool):
+        if not self._p2p_last_snapshot or not self._p2p_sweep:
+            self._p2p_status_var.set("No depth sweep available for paper cycle.")
+            return
+        settings = self._p2p_route_settings()
+        if not settings:
+            return
+        state = self.p2p_paper.state(settings.capital_php)
+        paper_capital = self._num(state.get("balance_php"), settings.capital_php)
+        paper_settings = P2PRouteSettings(
+            capital_php=paper_capital,
+            min_profit_php=settings.min_profit_php,
+            min_profit_pct=settings.min_profit_pct,
+            min_completion_rate=settings.min_completion_rate,
+            min_orders=settings.min_orders,
+            cross_exchange_transfer_fee_usdt=settings.cross_exchange_transfer_fee_usdt,
+            local_buffer_php=settings.local_buffer_php,
+            allowed_methods=settings.allowed_methods,
+        )
+        paper_sweep = build_depth_sweep([self._p2p_last_snapshot], settings=paper_settings)
+        if not paper_sweep:
+            self._p2p_status_var.set("Paper cycle skipped: not enough depth.")
+            return
+        state, cycle = self.p2p_paper.execute_if_profitable(
+            paper_sweep,
+            min_profit_pct=settings.min_profit_pct,
+            starting_php=settings.capital_php,
+        )
+        self._refresh_p2p_paper_summary(state)
+        if cycle:
+            source = "Auto paper" if auto else "Paper"
+            self._p2p_status_var.set(
+                f"{source} cycle: {cycle.profit_php:+,.0f} PHP | "
+                f"Balance {cycle.balance_after_php:,.0f} PHP"
+            )
+        elif not auto:
+            self._p2p_status_var.set("Paper cycle skipped: sweep is below profit filter.")
+
+    def _reset_p2p_paper(self):
+        try:
+            starting_php = float(self._p2p_capital_php.get())
+        except ValueError as exc:
+            self._p2p_status_var.set(f"P2P settings error: {exc}")
+            return
+        state = self.p2p_paper.reset(starting_php)
+        self._refresh_p2p_paper_summary(state)
+        self._p2p_status_var.set(f"P2P paper arb reset to {starting_php:,.0f} PHP.")
+
+    def _refresh_p2p_paper_summary(self, state: dict | None = None):
+        if not hasattr(self, "_p2p_paper_balance_var"):
+            return
+        starting_php = 500_000
+        if hasattr(self, "_p2p_capital_php"):
+            starting_php = self._num(self._p2p_capital_php.get(), 500_000)
+        state = state or self.p2p_paper.state(starting_php)
+        balance = self._num(state.get("balance_php"), 0)
+        cycles = state.get("cycles", [])
+        realized = self._num(state.get("realized_profit_php"), 0)
+        self._p2p_paper_balance_var.set(f"{balance:,.0f} PHP")
+        self._p2p_paper_cycles_var.set(f"{len(cycles)} ({realized:+,.0f})")
 
     def _log_top_p2p_route(self):
         if not self._p2p_routes:
@@ -1003,6 +1130,13 @@ class Dashboard:
         self._s_monthly_day = tk.StringVar(value=str(config.MONTHLY_CONTRIBUTION_DAY))
         row("Contribution day", lambda p: field(p, self._s_monthly_day, 8), 7)
 
+        self._s_auto_start = tk.BooleanVar(value=config.AUTO_START_FUTURES)
+        auto_frame = tk.Frame(grid, bg="#0d1117")
+        auto_frame.grid(row=8, column=1, sticky="w", padx=8, pady=4)
+        ttk.Label(grid, text="Auto-start futures", foreground="#8b949e", background="#0d1117",
+                  font=("Consolas", 9), width=22).grid(row=8, column=0, sticky="w", pady=4)
+        ttk.Checkbutton(auto_frame, text="Enable on launch", variable=self._s_auto_start).pack(side="left")
+
         # Apply button
         self._s_status = tk.StringVar(value="")
         bf = tk.Frame(settings_panel, bg="#0d1117")
@@ -1056,6 +1190,7 @@ class Dashboard:
             per_trade = float(self._s_per_trade.get()) / 100
             monthly_contribution = float(self._s_monthly_contribution.get())
             monthly_day = int(self._s_monthly_day.get())
+            auto_start = self._s_auto_start.get()
         except ValueError as e:
             self._s_status.set(f"Error: {e}")
             return
@@ -1080,6 +1215,7 @@ class Dashboard:
             "PER_TRADE_PCT":      per_trade,
             "MONTHLY_CONTRIBUTION_USD": monthly_contribution,
             "MONTHLY_CONTRIBUTION_DAY": monthly_day,
+            "AUTO_START_FUTURES": "true" if auto_start else "false",
         })
 
         # Hot-apply to config (new trades pick these up immediately)
@@ -1092,6 +1228,7 @@ class Dashboard:
         config.PER_TRADE_PCT      = per_trade
         config.MONTHLY_CONTRIBUTION_USD = monthly_contribution
         config.MONTHLY_CONTRIBUTION_DAY = monthly_day
+        config.AUTO_START_FUTURES = auto_start
         self.trader.leverage      = leverage
         self.engine_var.set(self._new_trade_setting_text())
 
@@ -1147,7 +1284,8 @@ class Dashboard:
 
     def _on_run_now(self):
         if self._paused:
-            return
+            self._paused = False
+            self.pause_btn.config(text="Pause")
         self._force_event.set()
         self.status_var.set("Running cycle now...")
 
@@ -1268,6 +1406,7 @@ class Dashboard:
 
     def _update_status(self):
         if self._paused:
+            self.status_var.set("Paused. Press Resume to start futures paper trading.")
             return
         if self._last_cycle_time is None:
             self.status_var.set("Waiting for first cycle...")

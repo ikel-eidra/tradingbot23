@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +47,37 @@ class P2PRoute:
 
 
 @dataclass(frozen=True)
+class P2PSweepLot:
+    """One filled piece of a multi-ad paper P2P cycle."""
+
+    side: str
+    marketplace: str
+    advertiser: str
+    price: float
+    php: float
+    usdt: float
+
+
+@dataclass(frozen=True)
+class P2PDepthSweep:
+    """A multi-ad P2P sweep using weighted average buy and sell prices."""
+
+    size_php: float
+    buy_usdt: float
+    sell_usdt: float
+    sell_php: float
+    avg_buy_price: float
+    avg_sell_price: float
+    transfer_fee_usdt: float
+    profit_php: float
+    profit_pct: float
+    grade: str
+    warnings: tuple[str, ...]
+    buy_lots: tuple[P2PSweepLot, ...]
+    sell_lots: tuple[P2PSweepLot, ...]
+
+
+@dataclass(frozen=True)
 class P2PRouteSettings:
     capital_php: float = 500_000.0
     min_profit_php: float = 100.0
@@ -55,6 +87,18 @@ class P2PRouteSettings:
     cross_exchange_transfer_fee_usdt: float = 1.0
     local_buffer_php: float = 0.0
     allowed_methods: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class P2PPaperCycle:
+    timestamp: str
+    size_php: float
+    profit_php: float
+    profit_pct: float
+    balance_after_php: float
+    avg_buy_price: float
+    avg_sell_price: float
+    warnings: tuple[str, ...]
 
 
 class P2PJournal:
@@ -115,6 +159,77 @@ class P2PJournal:
         return rows[-limit:]
 
 
+class P2PPaperArb:
+    """Persistent paper balance for simulated P2P arbitrage cycles."""
+
+    def __init__(self, path: Path | None = None):
+        self.path = path or (config.DATA_DIR / "p2p_paper_arb.json")
+
+    def state(self, starting_php: float = 500_000.0) -> dict:
+        if self.path.exists():
+            try:
+                return json.loads(self.path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                pass
+        return self.reset(starting_php)
+
+    def reset(self, starting_php: float = 500_000.0) -> dict:
+        now = datetime.now(timezone.utc).isoformat()
+        state = {
+            "started_at": now,
+            "starting_php": float(starting_php),
+            "balance_php": float(starting_php),
+            "realized_profit_php": 0.0,
+            "cycles": [],
+        }
+        self._save(state)
+        return state
+
+    def execute_if_profitable(
+        self,
+        sweep: P2PDepthSweep,
+        min_profit_pct: float,
+        starting_php: float = 500_000.0,
+    ) -> tuple[dict, P2PPaperCycle | None]:
+        state = self.state(starting_php)
+        if sweep.size_php <= 0 or sweep.profit_php <= 0 or sweep.profit_pct < min_profit_pct:
+            return state, None
+
+        balance_before = float(state.get("balance_php", starting_php))
+        balance_after = balance_before + sweep.profit_php
+        cycle = P2PPaperCycle(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            size_php=sweep.size_php,
+            profit_php=sweep.profit_php,
+            profit_pct=sweep.profit_pct,
+            balance_after_php=balance_after,
+            avg_buy_price=sweep.avg_buy_price,
+            avg_sell_price=sweep.avg_sell_price,
+            warnings=sweep.warnings,
+        )
+
+        cycles = list(state.get("cycles", []))
+        cycles.append({
+            "timestamp": cycle.timestamp,
+            "size_php": cycle.size_php,
+            "profit_php": cycle.profit_php,
+            "profit_pct": cycle.profit_pct,
+            "balance_after_php": cycle.balance_after_php,
+            "avg_buy_price": cycle.avg_buy_price,
+            "avg_sell_price": cycle.avg_sell_price,
+            "warnings": list(cycle.warnings),
+        })
+        state["cycles"] = cycles[-500:]
+        state["balance_php"] = balance_after
+        state["realized_profit_php"] = float(state.get("realized_profit_php", 0.0)) + sweep.profit_php
+        self._save(state)
+        return state, cycle
+
+    def _save(self, state: dict) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
 def build_p2p_routes(
     snapshots: Iterable[P2PSnapshot],
     settings: P2PRouteSettings | None = None,
@@ -139,6 +254,67 @@ def build_p2p_routes(
     routes.sort(key=lambda r: (r.grade, r.profit_php), reverse=True)
     routes.sort(key=lambda r: r.profit_php, reverse=True)
     return routes[:max_routes]
+
+
+def build_depth_sweep(
+    snapshots: Iterable[P2PSnapshot],
+    settings: P2PRouteSettings | None = None,
+) -> P2PDepthSweep | None:
+    """Build a 500k-style sweep across multiple real P2P ads."""
+
+    settings = settings or P2PRouteSettings()
+    buy_ads: list[P2PAd] = []
+    sell_ads: list[P2PAd] = []
+    for snapshot in snapshots:
+        buy_ads.extend(snapshot.buy_ads)
+        sell_ads.extend(snapshot.sell_ads)
+
+    buy_ads.sort(key=lambda ad: ad.price)
+    sell_ads.sort(key=lambda ad: ad.price, reverse=True)
+
+    buy_lots, spent_php, buy_usdt = _sweep_buy_side(buy_ads, settings.capital_php)
+    if spent_php <= 0 or buy_usdt <= 0:
+        return None
+
+    fee_usdt = 0.0
+    marketplaces = {lot.marketplace for lot in buy_lots}
+    if len(marketplaces) > 1:
+        fee_usdt = settings.cross_exchange_transfer_fee_usdt
+
+    sell_target_usdt = max(0.0, buy_usdt - fee_usdt)
+    sell_lots, sold_usdt, sold_php = _sweep_sell_side(sell_ads, sell_target_usdt)
+    avg_buy = spent_php / buy_usdt if buy_usdt > 0 else 0.0
+    avg_sell = sold_php / sold_usdt if sold_usdt > 0 else 0.0
+    profit_php = sold_php - spent_php - settings.local_buffer_php
+    profit_pct = profit_php / spent_php * 100 if spent_php > 0 else 0.0
+
+    warnings = _sweep_warnings(
+        settings=settings,
+        buy_lots=buy_lots,
+        sell_lots=sell_lots,
+        spent_php=spent_php,
+        buy_usdt=buy_usdt,
+        sold_usdt=sold_usdt,
+        profit_php=profit_php,
+        profit_pct=profit_pct,
+    )
+    grade = _grade_route(profit_pct, warnings)
+
+    return P2PDepthSweep(
+        size_php=spent_php,
+        buy_usdt=buy_usdt,
+        sell_usdt=sold_usdt,
+        sell_php=sold_php,
+        avg_buy_price=avg_buy,
+        avg_sell_price=avg_sell,
+        transfer_fee_usdt=fee_usdt,
+        profit_php=profit_php,
+        profit_pct=profit_pct,
+        grade=grade,
+        warnings=warnings,
+        buy_lots=tuple(buy_lots),
+        sell_lots=tuple(sell_lots),
+    )
 
 
 def _build_route(
@@ -186,6 +362,55 @@ def _build_route(
     )
 
 
+def _sweep_buy_side(buy_ads: list[P2PAd], target_php: float) -> tuple[list[P2PSweepLot], float, float]:
+    lots: list[P2PSweepLot] = []
+    remaining_php = max(0.0, target_php)
+    spent_php = 0.0
+    buy_usdt = 0.0
+
+    for ad in buy_ads:
+        if remaining_php <= 0:
+            break
+        capacity_php = min(ad.max_limit, ad.available * ad.price)
+        if capacity_php < ad.min_limit:
+            continue
+        spend_php = min(remaining_php, capacity_php)
+        if spend_php < ad.min_limit:
+            continue
+        usdt = spend_php / ad.price
+        lots.append(P2PSweepLot("BUY", ad.marketplace, ad.advertiser, ad.price, spend_php, usdt))
+        spent_php += spend_php
+        buy_usdt += usdt
+        remaining_php -= spend_php
+
+    return lots, spent_php, buy_usdt
+
+
+def _sweep_sell_side(sell_ads: list[P2PAd], target_usdt: float) -> tuple[list[P2PSweepLot], float, float]:
+    lots: list[P2PSweepLot] = []
+    remaining_usdt = max(0.0, target_usdt)
+    sold_usdt = 0.0
+    sold_php = 0.0
+
+    for ad in sell_ads:
+        if remaining_usdt <= 0:
+            break
+        capacity_php = min(ad.max_limit, ad.available * ad.price)
+        if capacity_php < ad.min_limit:
+            continue
+        capacity_usdt = capacity_php / ad.price
+        lot_usdt = min(remaining_usdt, capacity_usdt)
+        lot_php = lot_usdt * ad.price
+        if lot_php < ad.min_limit:
+            continue
+        lots.append(P2PSweepLot("SELL", ad.marketplace, ad.advertiser, ad.price, lot_php, lot_usdt))
+        sold_usdt += lot_usdt
+        sold_php += lot_php
+        remaining_usdt -= lot_usdt
+
+    return lots, sold_usdt, sold_php
+
+
 def _usable_size_php(buy_ad: P2PAd, sell_ad: P2PAd, capital_php: float) -> float:
     max_buy_php = min(buy_ad.max_limit, buy_ad.available * buy_ad.price)
     max_sell_php = min(sell_ad.max_limit, sell_ad.available * sell_ad.price)
@@ -217,6 +442,32 @@ def _warnings(
             warnings.append(f"{label} method not allowed")
     if size_php < settings.capital_php * 0.2:
         warnings.append("small capacity")
+    return tuple(warnings)
+
+
+def _sweep_warnings(
+    settings: P2PRouteSettings,
+    buy_lots: list[P2PSweepLot],
+    sell_lots: list[P2PSweepLot],
+    spent_php: float,
+    buy_usdt: float,
+    sold_usdt: float,
+    profit_php: float,
+    profit_pct: float,
+) -> tuple[str, ...]:
+    warnings: list[str] = []
+    if profit_php <= 0:
+        warnings.append("no net profit")
+    if profit_pct < settings.min_profit_pct:
+        warnings.append("below min pct")
+    if spent_php < settings.capital_php * 0.95:
+        warnings.append("partial buy fill")
+    if buy_usdt > 0 and sold_usdt < buy_usdt * 0.95:
+        warnings.append("partial sell fill")
+    if len(buy_lots) > 1:
+        warnings.append(f"{len(buy_lots)} buy ads")
+    if len(sell_lots) > 1:
+        warnings.append(f"{len(sell_lots)} sell ads")
     return tuple(warnings)
 
 
