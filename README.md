@@ -13,6 +13,7 @@ TradingBot23 identifies the **top 5 biggest losers** among the top 50 coins by m
 **Data sources (100% free, no API key required):**
 - [CoinGecko](https://coingecko.com) — market cap rankings and 24h price changes
 - [Binance public API](https://binance.com) — real-time prices for TP/SL monitoring
+- Binance P2P public search — read-only USDT/PHP buy/sell ads for arbitrage monitoring
 
 ---
 
@@ -29,13 +30,14 @@ The bot runs in **paper trading mode only**. It does not place real orders.
 
 ## Dashboard
 
-The app has a full GUI with four tabs:
+The app has a full GUI with five tabs:
 
 | Tab | What you see |
 |---|---|
-| **Live** | Open positions with entry price, current price, entry leverage, P&L%, TP, liquidation price, age |
+| **Open** | Open positions with entry price, current price, entry leverage, P&L%, TP, liquidation price, age |
 | **Charts** | Equity curve, trade return distribution, exit breakdown pie, cumulative P&L |
 | **History** | Every trade ever made, loaded from disk, plus exportable performance reports |
+| **P2P Arb** | USDT/PHP Binance P2P buy/sell ads, best raw spread, limits, payment methods, advertiser finish rate, and order count |
 | **Settings** | Change leverage, TP%, SL on/off, capital, monthly contribution, max hold days, and view the next 12 contribution markers |
 
 ---
@@ -94,12 +96,13 @@ Top-50 coins by market cap (BTC, ETH, SOL, BNB, etc.) have strong institutional 
 tradingbot23/
 ├── bot/
 │   ├── config.py                  # All settings loaded from .env
-│   ├── dashboard.py               # Tkinter GUI — 4 tabs (Live, Charts, History, Settings)
+│   ├── dashboard.py               # Tkinter GUI — Open, Charts, History, P2P Arb, Settings
 │   ├── setup_wizard.py            # First-run GUI wizard
 │   ├── main.py                    # Entry point
 │   └── modules/
 │       ├── data_fetcher.py        # CoinGecko API — rankings, 24h changes, snapshots
 │       ├── futures_trader.py      # Paper futures engine with leverage, funding, liquidation
+│       ├── p2p_monitor.py         # Read-only Binance P2P USDT/PHP spread monitor
 │       ├── strategy.py            # Basket logic, dip detection, fill_empty_slots
 │       ├── telegram_notifier.py   # Trade alerts via Telegram bot
 │       └── backtester.py          # Historical simulation using Binance klines
@@ -191,6 +194,21 @@ TradingBot23 is futures-only by design. Spot support was removed because spot/OC
 | Funding cost | ~0.03%/day modeled |
 | Liquidation | Tracked; unsafe entries are refused |
 | Real orders | Not implemented |
+
+---
+
+## P2P Arbitrage Monitor
+
+The **P2P Arb** tab is a read-only USDT/PHP monitor. It pulls Binance P2P ads once when opened, then refreshes every 60 seconds while the tab is selected.
+
+| Field | Detail |
+|---|---|
+| Best Buy USDT | Lowest seller price to buy USDT with PHP |
+| Best Sell USDT | Highest buyer price to sell USDT for PHP |
+| Raw Spread | Best sell price minus best buy price |
+| Tables | Top buy/sell ads with PHP limits, USDT available, payment methods, advertiser, finish rate, and order count |
+
+The spread is informational only. It does not include Binance availability changes, payment transfer time, payment-method risk, or manual execution slippage.
 
 ---
 

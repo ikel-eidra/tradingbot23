@@ -16,6 +16,7 @@ a = Analysis(
         'bot.modules',
         'bot.modules.data_fetcher',
         'bot.modules.futures_trader',
+        'bot.modules.p2p_monitor',
         'bot.modules.strategy',
         'bot.modules.backtester',
         'binance',

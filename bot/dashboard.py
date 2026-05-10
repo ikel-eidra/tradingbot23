@@ -20,12 +20,14 @@ import csv as _csv
 from bot import config
 from bot.modules import accounting
 from bot.modules.futures_trader import _history_csv
+from bot.modules.p2p_monitor import P2PMonitor, P2PSnapshot
 
 logger = logging.getLogger(__name__)
 
 
 class Dashboard:
     REFRESH_MS = 2000
+    P2P_REFRESH_SECS = 60
 
     def __init__(self, strategy):
         self.strategy = strategy
@@ -38,6 +40,10 @@ class Dashboard:
         self._last_cycle_time:    datetime | None = None
         self._last_cycle_summary: dict = {}
         self._next_cycle_ts:      float = 0.0
+        self.p2p_monitor = P2PMonitor(asset="USDT", fiat="PHP")
+        self._p2p_refreshing = False
+        self._p2p_last_snapshot: P2PSnapshot | None = None
+        self._p2p_next_refresh_ts = 0.0
 
         # Equity history: list of (datetime, portfolio_value)
         self._equity_history: list[tuple[datetime, float]] = []
@@ -169,23 +175,27 @@ class Dashboard:
                       font=("Consolas", 8)).pack(anchor="w")
             ttk.Label(card, textvariable=var, style=sty, background="#161b22").pack(anchor="w")
 
-        # ── Notebook (Live | Charts | History | Settings) ──
+        # ── Notebook ──
         nb = ttk.Notebook(self.root)
+        self.notebook = nb
         nb.pack(fill="both", expand=True, padx=0, pady=0)
 
         open_tab     = tk.Frame(nb, bg="#0d1117")
         charts_tab   = tk.Frame(nb, bg="#0d1117")
         history_tab  = tk.Frame(nb, bg="#0d1117")
+        p2p_tab      = tk.Frame(nb, bg="#0d1117")
         settings_tab = tk.Frame(nb, bg="#0d1117")
         nb.add(open_tab,     text="  Open  ")
         nb.add(charts_tab,   text="  Charts  ")
         nb.add(history_tab,  text="  History  ")
+        nb.add(p2p_tab,      text="  P2P Arb  ")
         nb.add(settings_tab, text="  Settings  ")
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         self._build_open_tab(open_tab)
         self._build_charts_tab(charts_tab)
         self._build_history_tab(history_tab)
+        self._build_p2p_tab(p2p_tab)
         self._build_settings_tab(settings_tab)
 
         # ── Bottom bar ──
@@ -528,6 +538,168 @@ class Dashboard:
         out.write_text(report, encoding="utf-8")
         self._hist_summary_var.set(f"Report exported: {out.name}")
 
+    # ── P2P arbitrage tab ────────────────────────────────────────────────────
+
+    def _build_p2p_tab(self, parent):
+        body = tk.Frame(parent, bg="#0d1117", padx=15, pady=12)
+        body.pack(fill="both", expand=True)
+
+        top = tk.Frame(body, bg="#0d1117")
+        top.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(top, text="USDT/PHP P2P ARBITRAGE MONITOR", style="Header.TLabel",
+                  background="#0d1117").pack(side="left")
+        ttk.Button(top, text="Refresh", style="Btn.TButton",
+                   command=self._refresh_p2p).pack(side="right")
+
+        self._p2p_status_var = tk.StringVar(value="Open this tab or press Refresh to load prices.")
+        ttk.Label(body, textvariable=self._p2p_status_var, foreground="#8b949e",
+                  background="#0d1117", font=("Consolas", 9)).pack(fill="x", anchor="w")
+
+        summary = tk.Frame(body, bg="#0d1117")
+        summary.pack(fill="x", pady=(8, 10))
+
+        self._p2p_buy_var = tk.StringVar(value="--")
+        self._p2p_sell_var = tk.StringVar(value="--")
+        self._p2p_spread_var = tk.StringVar(value="--")
+        self._p2p_spread_pct_var = tk.StringVar(value="--")
+
+        for label_text, var in [
+            ("BEST BUY USDT", self._p2p_buy_var),
+            ("BEST SELL USDT", self._p2p_sell_var),
+            ("RAW SPREAD", self._p2p_spread_var),
+            ("SPREAD %", self._p2p_spread_pct_var),
+        ]:
+            card = tk.Frame(summary, bg="#161b22",
+                            highlightbackground="#30363d", highlightthickness=1)
+            card.pack(side="left", padx=(0, 8), ipadx=12, ipady=6)
+            ttk.Label(card, text=label_text, foreground="#8b949e", background="#161b22",
+                      font=("Consolas", 8)).pack(anchor="w")
+            ttk.Label(card, textvariable=var, foreground="#58a6ff", background="#161b22",
+                      font=("Consolas", 14, "bold")).pack(anchor="w")
+
+        self.p2p_buy_tree = self._build_p2p_table(
+            body,
+            "BUY USDT WITH PHP (LOWEST SELLER PRICES)",
+            height=7,
+        )
+        self.p2p_sell_tree = self._build_p2p_table(
+            body,
+            "SELL USDT FOR PHP (HIGHEST BUYER PRICES)",
+            height=7,
+        )
+
+    def _build_p2p_table(self, parent, title: str, height: int):
+        section = tk.Frame(parent, bg="#0d1117")
+        section.pack(fill="both", expand=True, pady=(0, 10))
+
+        ttk.Label(section, text=title, style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(0, 3))
+
+        table_frame = tk.Frame(section, bg="#0d1117")
+        table_frame.pack(fill="both", expand=True)
+
+        cols = ("price", "limits", "available", "methods", "advertiser", "finish", "orders")
+        tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=height)
+        for col, heading, width in [
+            ("price", "PRICE PHP", 85),
+            ("limits", "LIMIT PHP", 145),
+            ("available", "AVAIL USDT", 95),
+            ("methods", "PAYMENT", 190),
+            ("advertiser", "ADVERTISER", 135),
+            ("finish", "FINISH", 70),
+            ("orders", "ORDERS", 70),
+        ]:
+            tree.heading(col, text=heading)
+            tree.column(col, width=width, anchor="center")
+
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        return tree
+
+    def _refresh_p2p(self):
+        if self._p2p_refreshing:
+            return
+        if not hasattr(self, "_p2p_status_var"):
+            return
+
+        self._p2p_refreshing = True
+        self._p2p_next_refresh_ts = time.time() + self.P2P_REFRESH_SECS
+        self._p2p_status_var.set("Loading Binance P2P USDT/PHP...")
+
+        worker = threading.Thread(target=self._load_p2p_snapshot, daemon=True)
+        worker.start()
+
+    def _load_p2p_snapshot(self):
+        snapshot = None
+        error = None
+        try:
+            snapshot = self.p2p_monitor.fetch_snapshot(rows=10)
+        except Exception as exc:
+            logger.exception("Failed to refresh P2P monitor")
+            error = str(exc)
+
+        def finish():
+            self._p2p_refreshing = False
+            if snapshot:
+                self._apply_p2p_snapshot(snapshot)
+            else:
+                self._p2p_status_var.set(f"P2P load failed: {error or 'unknown error'}")
+
+        try:
+            self.root.after(0, finish)
+        except tk.TclError:
+            pass
+
+    def _apply_p2p_snapshot(self, snapshot: P2PSnapshot):
+        self._p2p_last_snapshot = snapshot
+
+        buy = snapshot.best_buy
+        sell = snapshot.best_sell
+        spread = snapshot.spread
+        spread_pct = snapshot.spread_pct
+
+        self._p2p_buy_var.set(f"{buy.price:,.2f} PHP" if buy else "--")
+        self._p2p_sell_var.set(f"{sell.price:,.2f} PHP" if sell else "--")
+        self._p2p_spread_var.set(f"{spread:+.2f} PHP" if spread is not None else "--")
+        self._p2p_spread_pct_var.set(f"{spread_pct:+.3f}%" if spread_pct is not None else "--")
+        self._p2p_status_var.set(
+            f"USDT/PHP updated {snapshot.as_of.strftime('%H:%M:%S')} UTC  |  "
+            "Raw spread excludes fees, limits, and payment risk."
+        )
+
+        self._fill_p2p_tree(self.p2p_buy_tree, snapshot.buy_ads)
+        self._fill_p2p_tree(self.p2p_sell_tree, snapshot.sell_ads)
+
+    def _fill_p2p_tree(self, tree, ads):
+        for item in tree.get_children():
+            tree.delete(item)
+
+        for ad in ads:
+            tree.insert("", "end", values=(
+                f"{ad.price:,.2f}",
+                f"{ad.min_limit:,.0f}-{ad.max_limit:,.0f}",
+                f"{ad.available:,.2f}",
+                self._clip_text(ad.methods_text, 34),
+                self._clip_text(ad.advertiser, 22),
+                self._format_rate(ad.completion_rate),
+                str(ad.orders) if ad.orders is not None else "--",
+            ))
+
+    @staticmethod
+    def _format_rate(rate: float | None) -> str:
+        if rate is None:
+            return "--"
+        pct = rate * 100 if rate <= 1 else rate
+        return f"{pct:.1f}%"
+
+    @staticmethod
+    def _clip_text(value: str, limit: int) -> str:
+        text = str(value or "")
+        return text if len(text) <= limit else text[: max(0, limit - 3)] + "..."
+
     # ── Settings tab ──────────────────────────────────────────────────────────
 
     def _build_settings_tab(self, parent):
@@ -768,6 +940,8 @@ class Dashboard:
             self._draw_charts()
         elif tab == "History":
             self._refresh_history()
+        elif tab == "P2P Arb" and self._p2p_last_snapshot is None:
+            self._refresh_p2p()
 
     # ── Button handlers ────────────────────────────────────────────────────────
 
@@ -872,8 +1046,21 @@ class Dashboard:
             self._update_closed()
             self._update_basket()
             self._update_contribution_schedule()
+            self._maybe_refresh_p2p_tab()
         except Exception:
             logger.debug("Dashboard refresh error", exc_info=True)
+
+    def _maybe_refresh_p2p_tab(self):
+        if self._p2p_refreshing:
+            return
+        if not hasattr(self, "notebook") or not hasattr(self, "_p2p_status_var"):
+            return
+        try:
+            tab = self.notebook.tab(self.notebook.select(), "text").strip()
+        except tk.TclError:
+            return
+        if tab == "P2P Arb" and time.time() >= self._p2p_next_refresh_ts:
+            self._refresh_p2p()
 
     def _update_clock(self):
         self.clock_label.config(
