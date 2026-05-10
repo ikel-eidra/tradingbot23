@@ -238,7 +238,7 @@ class Backtester:
                         continue
 
                     entry_price = candle["close"]
-                    leverage = min(config.LEVERAGE, config.MAX_LEVERAGE)
+                    leverage = max(1, min(config.LEVERAGE, config.MAX_LEVERAGE))
                     notional = margin * leverage
                     entry_fee = notional * config.FUTURES_FEE_PCT
                     quantity = notional / entry_price

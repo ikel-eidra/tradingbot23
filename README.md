@@ -59,7 +59,7 @@ Top-50 coins by market cap (BTC, ETH, SOL, BNB, etc.) have strong institutional 
 | Max hold | 3 days | Auto-close at market if TP not reached |
 | Position size | 20% of portfolio | Dynamic compounding — grows with your portfolio |
 | Engine | Futures 1x (default) | One-cycle paper entries/exits with futures fee and liquidation modeling |
-| Leverage | 1x–5x (user configurable) | Hard cap at 5x for safety |
+| Leverage | 1x–20x (paper configurable) | Higher settings are for paper stress testing only |
 
 ### Execution Flow
 
@@ -125,7 +125,7 @@ All settings live in `.env`. The Settings tab in the GUI lets you change most of
 | `TRADING_MODE` | `paper` | Futures are paper-only; no live execution path is implemented |
 | `ENGINE` | `futures` | Futures-only; spot trading is intentionally disabled |
 | `CAPITAL_USD` | `500` | Starting paper capital in USD |
-| `LEVERAGE` | `1` | 1x–5x. 1x is the lowest-risk futures setting |
+| `LEVERAGE` | `1` | 1x–20x paper setting. 1x is the lowest-risk futures setting |
 | `TOP_N_COINS` | `50` | Market cap universe (top 50 recommended) |
 | `TOP_N_LOSERS` | `5` | Basket size (max simultaneous positions) |
 | `PER_TRADE_PCT` | `0.20` | 20% of portfolio per trade |
@@ -186,7 +186,7 @@ TradingBot23 is futures-only by design. Spot support was removed because spot/OC
 | Control | Detail |
 |---|---|
 | Execution | Paper-only futures simulation |
-| Leverage | 1x–5x (default 1x) |
+| Leverage | 1x–20x (default 1x, paper-only) |
 | Fees | 0.06% per side on notional |
 | Funding cost | ~0.03%/day modeled |
 | Liquidation | Tracked; unsafe entries are refused |

@@ -522,13 +522,15 @@ class Dashboard:
             font=("Consolas",10)), 0)
 
         # Leverage
-        self._s_leverage = tk.IntVar(value=config.LEVERAGE)
-        lf = tk.Frame(grid, bg="#0d1117")
-        lf.grid(row=1, column=1, sticky="w", padx=8, pady=4)
-        ttk.Label(grid, text="Leverage", foreground="#8b949e", background="#0d1117",
-                  font=("Consolas", 9), width=22).grid(row=1, column=0, sticky="w", pady=4)
-        for lv in range(1, 6):
-            ttk.Radiobutton(lf, text=f"{lv}x", variable=self._s_leverage, value=lv).pack(side="left", padx=4)
+        self._s_leverage = tk.StringVar(value=f"{config.LEVERAGE}x")
+        row("Leverage", lambda p: ttk.Combobox(
+            p,
+            textvariable=self._s_leverage,
+            values=[f"{lv}x" for lv in range(1, config.MAX_LEVERAGE + 1)],
+            state="readonly",
+            width=6,
+            font=("Consolas", 10),
+        ), 1)
 
         # TP %
         self._s_tp = tk.StringVar(value=str(round(config.FUTURES_NET_TP_PCT * 100, 2)))
@@ -612,7 +614,7 @@ class Dashboard:
     def _apply_settings(self):
         try:
             capital   = float(self._s_capital.get())
-            leverage  = int(self._s_leverage.get())
+            leverage  = int(str(self._s_leverage.get()).lower().replace("x", "").strip())
             tp_pct    = float(self._s_tp.get()) / 100
             sl_on     = self._s_sl_enabled.get()
             sl_pct    = float(self._s_sl.get()) / 100
@@ -625,6 +627,7 @@ class Dashboard:
             return
 
         leverage = max(1, min(leverage, config.MAX_LEVERAGE))
+        self._s_leverage.set(f"{leverage}x")
         if monthly_contribution < 0:
             self._s_status.set("Error: monthly contribution cannot be negative")
             return

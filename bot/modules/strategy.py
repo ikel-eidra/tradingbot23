@@ -178,8 +178,12 @@ class Strategy:
         for coin in dipping_coins:
             symbol = coin["symbol"]
 
-            # Skip if already have an open position
             open_positions = self.trader.get_open_positions()
+            if len(open_positions) >= config.TOP_N_LOSERS:
+                logger.debug("Skipping %s — max open position slots reached", symbol)
+                break
+
+            # Skip if already have an open position
             if any(p.symbol == symbol for p in open_positions):
                 logger.debug("Skipping %s — already have open position", symbol)
                 continue

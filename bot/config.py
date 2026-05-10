@@ -75,8 +75,8 @@ POSITION_CHECK_MINS = float(os.getenv("POSITION_CHECK_MINS", "5"))  # how often 
 ENGINE = "futures"
 
 # --- Futures settings ---
-LEVERAGE = int(os.getenv("LEVERAGE", "1"))  # 1x default; hard cap below.
-MAX_LEVERAGE = 5  # Hard cap for safety
+LEVERAGE = int(os.getenv("LEVERAGE", "1"))  # 1x default; paper cap below.
+MAX_LEVERAGE = 20  # Paper-only cap for stress testing leverage behavior.
 FUTURES_FEE_PCT = float(os.getenv("FUTURES_FEE_PCT", "0.0006"))  # 0.06% taker (Binance USDT-M)
 # Average daily funding cost as % of notional. Binance posts every 8h.
 # Historical average is ~0.01% per 8h = 0.03% per day. Conservative default.

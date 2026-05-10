@@ -96,7 +96,7 @@ class FuturesTrader:
         self.api_secret = api_secret or config.BINANCE_API_SECRET
         # Force paper mode — there is no live futures execution path here.
         self.paper_mode = True
-        self.leverage = min(config.LEVERAGE, config.MAX_LEVERAGE)
+        self.leverage = max(1, min(config.LEVERAGE, config.MAX_LEVERAGE))
         if config.LEVERAGE > config.MAX_LEVERAGE:
             logger.warning(
                 "LEVERAGE %dx exceeds MAX_LEVERAGE %dx — clamped to %dx for safety",

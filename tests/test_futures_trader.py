@@ -33,6 +33,7 @@ class TestFuturesTrader(unittest.TestCase):
         config.LEVERAGE = 999
         t = FuturesTrader()
         self.assertEqual(t.leverage, config.MAX_LEVERAGE)
+        self.assertEqual(t.leverage, 20)
 
     def test_open_paper_long(self):
         with patch.object(self.trader, "get_current_price", return_value=100.0):
