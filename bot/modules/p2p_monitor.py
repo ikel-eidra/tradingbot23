@@ -26,6 +26,7 @@ class P2PAd:
     side: str
     asset: str
     fiat: str
+    marketplace: str
     price: float
     min_limit: float
     max_limit: float
@@ -44,6 +45,7 @@ class P2PAd:
 class P2PSnapshot:
     """Best available buy/sell ads plus derived spread."""
 
+    marketplace: str
     asset: str
     fiat: str
     buy_ads: list[P2PAd]
@@ -78,10 +80,12 @@ class P2PMonitor:
         self,
         asset: str = "USDT",
         fiat: str = "PHP",
+        marketplace: str = "Binance",
         session: requests.Session | None = None,
     ):
         self.asset = asset.upper()
         self.fiat = fiat.upper()
+        self.marketplace = marketplace
         self.session = session or requests.Session()
         if hasattr(self.session, "headers"):
             self.session.headers.update({
@@ -100,6 +104,7 @@ class P2PMonitor:
         buy_ads = self.fetch_ads("BUY", rows=rows, pay_types=pay_types)
         sell_ads = self.fetch_ads("SELL", rows=rows, pay_types=pay_types)
         return P2PSnapshot(
+            marketplace=self.marketplace,
             asset=self.asset,
             fiat=self.fiat,
             buy_ads=buy_ads,
@@ -123,10 +128,11 @@ class P2PMonitor:
         side = side.upper()
         if side not in {"BUY", "SELL"}:
             raise ValueError("side must be BUY or SELL")
+        rows = min(max(1, int(rows)), 20)
 
         payload = {
             "page": 1,
-            "rows": max(1, int(rows)),
+            "rows": rows,
             "payTypes": list(pay_types or []),
             "asset": self.asset,
             "tradeType": side,
@@ -177,6 +183,7 @@ class P2PMonitor:
             side=side,
             asset=(adv.get("asset") or self.asset).upper(),
             fiat=(adv.get("fiatUnit") or self.fiat).upper(),
+            marketplace=self.marketplace,
             price=self._to_float(adv.get("price")),
             min_limit=self._to_float(adv.get("minSingleTransAmount")),
             max_limit=self._to_float(adv.get("maxSingleTransAmount")),

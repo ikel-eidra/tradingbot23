@@ -20,6 +20,12 @@ import csv as _csv
 from bot import config
 from bot.modules import accounting
 from bot.modules.futures_trader import _history_csv
+from bot.modules.p2p_arbitrage import (
+    P2PJournal,
+    P2PRoute,
+    P2PRouteSettings,
+    build_p2p_routes,
+)
 from bot.modules.p2p_monitor import P2PMonitor, P2PSnapshot
 
 logger = logging.getLogger(__name__)
@@ -41,8 +47,10 @@ class Dashboard:
         self._last_cycle_summary: dict = {}
         self._next_cycle_ts:      float = 0.0
         self.p2p_monitor = P2PMonitor(asset="USDT", fiat="PHP")
+        self.p2p_journal = P2PJournal()
         self._p2p_refreshing = False
         self._p2p_last_snapshot: P2PSnapshot | None = None
+        self._p2p_routes: list[P2PRoute] = []
         self._p2p_next_refresh_ts = 0.0
 
         # Equity history: list of (datetime, portfolio_value)
@@ -51,8 +59,8 @@ class Dashboard:
 
         self.root = tk.Tk()
         self.root.title("TradingBot23")
-        self.root.geometry("940x720")
-        self.root.minsize(800, 580)
+        self.root.geometry("1080x780")
+        self.root.minsize(980, 680)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_ui()
@@ -547,10 +555,50 @@ class Dashboard:
         top = tk.Frame(body, bg="#0d1117")
         top.pack(fill="x", pady=(0, 8))
 
-        ttk.Label(top, text="USDT/PHP P2P ARBITRAGE MONITOR", style="Header.TLabel",
+        ttk.Label(top, text="USDT/PHP P2P CYCLE COMMAND CENTER", style="Header.TLabel",
                   background="#0d1117").pack(side="left")
+        ttk.Button(top, text="Log Top Route", style="Btn.TButton",
+                   command=self._log_top_p2p_route).pack(side="right", padx=(6, 0))
         ttk.Button(top, text="Refresh", style="Btn.TButton",
                    command=self._refresh_p2p).pack(side="right")
+
+        controls = tk.Frame(body, bg="#0d1117")
+        controls.pack(fill="x", pady=(0, 8))
+
+        self._p2p_capital_php = tk.StringVar(value="500000")
+        self._p2p_min_profit_pct = tk.StringVar(value="0.10")
+        self._p2p_transfer_fee_usdt = tk.StringVar(value="1.0")
+        self._p2p_buffer_php = tk.StringVar(value="0")
+
+        for label_text, var, width in [
+            ("Capital PHP", self._p2p_capital_php, 10),
+            ("Min net %", self._p2p_min_profit_pct, 6),
+            ("Xfer fee USDT", self._p2p_transfer_fee_usdt, 6),
+            ("Buffer PHP", self._p2p_buffer_php, 7),
+        ]:
+            group = tk.Frame(controls, bg="#0d1117")
+            group.pack(side="left", padx=(0, 12))
+            ttk.Label(group, text=label_text, foreground="#8b949e", background="#0d1117",
+                      font=("Consolas", 8)).pack(anchor="w")
+            tk.Entry(
+                group,
+                textvariable=var,
+                width=width,
+                font=("Consolas", 9),
+                bg="#f0f6fc",
+                fg="#0d1117",
+                insertbackground="#0d1117",
+                selectbackground="#58a6ff",
+                selectforeground="#0d1117",
+                relief="solid",
+                bd=1,
+                highlightthickness=1,
+                highlightbackground="#8b949e",
+                highlightcolor="#58a6ff",
+            ).pack(anchor="w")
+
+        ttk.Button(controls, text="Recalculate", style="Btn.TButton",
+                   command=self._recalculate_p2p_routes).pack(side="left", padx=(0, 12), pady=(13, 0))
 
         self._p2p_status_var = tk.StringVar(value="Open this tab or press Refresh to load prices.")
         ttk.Label(body, textvariable=self._p2p_status_var, foreground="#8b949e",
@@ -561,14 +609,14 @@ class Dashboard:
 
         self._p2p_buy_var = tk.StringVar(value="--")
         self._p2p_sell_var = tk.StringVar(value="--")
-        self._p2p_spread_var = tk.StringVar(value="--")
-        self._p2p_spread_pct_var = tk.StringVar(value="--")
+        self._p2p_top_profit_var = tk.StringVar(value="--")
+        self._p2p_top_route_var = tk.StringVar(value="--")
 
         for label_text, var in [
             ("BEST BUY USDT", self._p2p_buy_var),
             ("BEST SELL USDT", self._p2p_sell_var),
-            ("RAW SPREAD", self._p2p_spread_var),
-            ("SPREAD %", self._p2p_spread_pct_var),
+            ("TOP NET PROFIT", self._p2p_top_profit_var),
+            ("TOP ROUTE", self._p2p_top_route_var),
         ]:
             card = tk.Frame(summary, bg="#161b22",
                             highlightbackground="#30363d", highlightthickness=1)
@@ -578,16 +626,69 @@ class Dashboard:
             ttk.Label(card, textvariable=var, foreground="#58a6ff", background="#161b22",
                       font=("Consolas", 14, "bold")).pack(anchor="w")
 
+        route_section = tk.Frame(body, bg="#0d1117")
+        route_section.pack(fill="both", expand=True, pady=(0, 8))
+        ttk.Label(route_section, text="ROUTE CALCULATOR", style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(0, 3))
+
+        route_cols = ("route", "size", "buy", "sell", "profit", "pct", "grade", "warnings")
+        self.p2p_route_tree = ttk.Treeview(route_section, columns=route_cols, show="headings", height=5)
+        for col, heading, width in [
+            ("route", "ROUTE", 115),
+            ("size", "SIZE PHP", 95),
+            ("buy", "BUY", 135),
+            ("sell", "SELL", 135),
+            ("profit", "NET PHP", 95),
+            ("pct", "NET %", 65),
+            ("grade", "GRADE", 65),
+            ("warnings", "WARNINGS", 220),
+        ]:
+            self.p2p_route_tree.heading(col, text=heading)
+            self.p2p_route_tree.column(col, width=width, anchor="center")
+        self.p2p_route_tree.tag_configure("A", foreground="#3fb950")
+        self.p2p_route_tree.tag_configure("B", foreground="#58a6ff")
+        self.p2p_route_tree.tag_configure("C", foreground="#e3b341")
+        self.p2p_route_tree.tag_configure("REVIEW", foreground="#f85149")
+        self.p2p_route_tree.tag_configure("WATCH", foreground="#8b949e")
+        self.p2p_route_tree.tag_configure("SKIP", foreground="#f85149")
+        self.p2p_route_tree.pack(fill="both", expand=True)
+
+        ad_tables = tk.Frame(body, bg="#0d1117")
+        ad_tables.pack(fill="both", expand=True)
+        buy_parent = tk.Frame(ad_tables, bg="#0d1117")
+        sell_parent = tk.Frame(ad_tables, bg="#0d1117")
+        buy_parent.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        sell_parent.pack(side="left", fill="both", expand=True, padx=(6, 0))
+
         self.p2p_buy_tree = self._build_p2p_table(
-            body,
+            buy_parent,
             "BUY USDT WITH PHP (LOWEST SELLER PRICES)",
-            height=7,
+            height=5,
         )
         self.p2p_sell_tree = self._build_p2p_table(
-            body,
+            sell_parent,
             "SELL USDT FOR PHP (HIGHEST BUYER PRICES)",
-            height=7,
+            height=5,
         )
+
+        journal = tk.Frame(body, bg="#0d1117")
+        journal.pack(fill="both", expand=True, pady=(0, 4))
+        ttk.Label(journal, text="RECENT P2P CYCLE JOURNAL", style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(0, 3))
+        journal_cols = ("time", "status", "route", "size", "profit", "notes")
+        self.p2p_journal_tree = ttk.Treeview(journal, columns=journal_cols, show="headings", height=4)
+        for col, heading, width in [
+            ("time", "TIME", 120),
+            ("status", "STATUS", 85),
+            ("route", "ROUTE", 120),
+            ("size", "SIZE PHP", 90),
+            ("profit", "EXP PHP", 90),
+            ("notes", "NOTES", 320),
+        ]:
+            self.p2p_journal_tree.heading(col, text=heading)
+            self.p2p_journal_tree.column(col, width=width, anchor="center")
+        self.p2p_journal_tree.pack(fill="both", expand=True)
+        self._refresh_p2p_journal()
 
     def _build_p2p_table(self, parent, title: str, height: int):
         section = tk.Frame(parent, bg="#0d1117")
@@ -627,7 +728,7 @@ class Dashboard:
 
         self._p2p_refreshing = True
         self._p2p_next_refresh_ts = time.time() + self.P2P_REFRESH_SECS
-        self._p2p_status_var.set("Loading Binance P2P USDT/PHP...")
+        self._p2p_status_var.set("Loading Binance P2P USDT/PHP and recalculating routes...")
 
         worker = threading.Thread(target=self._load_p2p_snapshot, daemon=True)
         worker.start()
@@ -636,7 +737,7 @@ class Dashboard:
         snapshot = None
         error = None
         try:
-            snapshot = self.p2p_monitor.fetch_snapshot(rows=10)
+            snapshot = self.p2p_monitor.fetch_snapshot(rows=20)
         except Exception as exc:
             logger.exception("Failed to refresh P2P monitor")
             error = str(exc)
@@ -658,20 +759,119 @@ class Dashboard:
 
         buy = snapshot.best_buy
         sell = snapshot.best_sell
-        spread = snapshot.spread
-        spread_pct = snapshot.spread_pct
 
         self._p2p_buy_var.set(f"{buy.price:,.2f} PHP" if buy else "--")
         self._p2p_sell_var.set(f"{sell.price:,.2f} PHP" if sell else "--")
-        self._p2p_spread_var.set(f"{spread:+.2f} PHP" if spread is not None else "--")
-        self._p2p_spread_pct_var.set(f"{spread_pct:+.3f}%" if spread_pct is not None else "--")
-        self._p2p_status_var.set(
-            f"USDT/PHP updated {snapshot.as_of.strftime('%H:%M:%S')} UTC  |  "
-            "Raw spread excludes fees, limits, and payment risk."
-        )
 
         self._fill_p2p_tree(self.p2p_buy_tree, snapshot.buy_ads)
         self._fill_p2p_tree(self.p2p_sell_tree, snapshot.sell_ads)
+        self._recalculate_p2p_routes(update_status=False)
+
+        self._p2p_status_var.set(
+            f"USDT/PHP updated {snapshot.as_of.strftime('%H:%M:%S')} UTC  |  "
+            "Routes are estimates only; manual fiat verification is still required."
+        )
+
+    def _recalculate_p2p_routes(self, update_status: bool = True):
+        if not self._p2p_last_snapshot:
+            if update_status and hasattr(self, "_p2p_status_var"):
+                self._p2p_status_var.set("Load P2P prices before recalculating routes.")
+            return
+
+        settings = self._p2p_route_settings()
+        if not settings:
+            return
+
+        self._p2p_routes = build_p2p_routes([self._p2p_last_snapshot], settings=settings)
+        self._fill_p2p_route_tree(self._p2p_routes)
+
+        if self._p2p_routes:
+            top = self._p2p_routes[0]
+            self._p2p_top_profit_var.set(f"{top.profit_php:+,.0f} PHP")
+            self._p2p_top_route_var.set(f"{top.route_label} {top.grade}")
+            if update_status:
+                self._p2p_status_var.set(
+                    f"Recalculated {len(self._p2p_routes)} route(s) for "
+                    f"{settings.capital_php:,.0f} PHP capital."
+                )
+        else:
+            self._p2p_top_profit_var.set("--")
+            self._p2p_top_route_var.set("--")
+            if update_status:
+                self._p2p_status_var.set("No route meets the current profit filters.")
+
+    def _p2p_route_settings(self) -> P2PRouteSettings | None:
+        try:
+            capital_php = float(self._p2p_capital_php.get())
+            min_profit_pct = float(self._p2p_min_profit_pct.get())
+            transfer_fee = float(self._p2p_transfer_fee_usdt.get())
+            buffer_php = float(self._p2p_buffer_php.get())
+        except ValueError as exc:
+            self._p2p_status_var.set(f"P2P settings error: {exc}")
+            return None
+
+        if capital_php <= 0:
+            self._p2p_status_var.set("P2P settings error: capital must be positive")
+            return None
+        if min_profit_pct < 0 or transfer_fee < 0 or buffer_php < 0:
+            self._p2p_status_var.set("P2P settings error: min %, fee, and buffer cannot be negative")
+            return None
+
+        return P2PRouteSettings(
+            capital_php=capital_php,
+            min_profit_php=-1_000_000_000.0,
+            min_profit_pct=min_profit_pct,
+            cross_exchange_transfer_fee_usdt=transfer_fee,
+            local_buffer_php=buffer_php,
+        )
+
+    def _fill_p2p_route_tree(self, routes: list[P2PRoute]):
+        for item in self.p2p_route_tree.get_children():
+            self.p2p_route_tree.delete(item)
+
+        for route in routes:
+            warnings = "; ".join(route.warnings) if route.warnings else "ok"
+            self.p2p_route_tree.insert("", "end", tags=(route.grade,), values=(
+                route.route_label,
+                f"{route.size_php:,.0f}",
+                f"{route.buy_ad.marketplace} {route.buy_ad.price:,.2f}",
+                f"{route.sell_ad.marketplace} {route.sell_ad.price:,.2f}",
+                f"{route.profit_php:+,.0f}",
+                f"{route.profit_pct:+.3f}%",
+                route.grade,
+                self._clip_text(warnings, 34),
+            ))
+
+    def _log_top_p2p_route(self):
+        if not self._p2p_routes:
+            self._p2p_status_var.set("No P2P route to log yet.")
+            return
+
+        route = self._p2p_routes[0]
+        if route.profit_php <= 0:
+            self._p2p_status_var.set("Top P2P route is not profitable, not logged.")
+            return
+        path = self.p2p_journal.append(route, status="WATCHLIST")
+        self._refresh_p2p_journal()
+        self._p2p_status_var.set(f"Logged top P2P route to {path.name}.")
+
+    def _refresh_p2p_journal(self):
+        if not hasattr(self, "p2p_journal_tree"):
+            return
+        for item in self.p2p_journal_tree.get_children():
+            self.p2p_journal_tree.delete(item)
+
+        for row in reversed(self.p2p_journal.recent(limit=8)):
+            ts = row.get("timestamp", "")
+            time_text = ts[:16].replace("T", " ")
+            self.p2p_journal_tree.insert("", "end", values=(
+                time_text,
+                row.get("status", ""),
+                row.get("route", ""),
+                f"{self._num(row.get('size_php')):,.0f}",
+                f"{self._num(row.get('expected_profit_php')):+,.0f}",
+                self._clip_text(row.get("notes", "") or row.get("warnings", ""), 48),
+            ))
 
     def _fill_p2p_tree(self, tree, ads):
         for item in tree.get_children():

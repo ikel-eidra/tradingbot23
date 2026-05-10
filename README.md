@@ -37,7 +37,7 @@ The app has a full GUI with five tabs:
 | **Open** | Open positions with entry price, current price, entry leverage, P&L%, TP, liquidation price, age |
 | **Charts** | Equity curve, trade return distribution, exit breakdown pie, cumulative P&L |
 | **History** | Every trade ever made, loaded from disk, plus exportable performance reports |
-| **P2P Arb** | USDT/PHP Binance P2P buy/sell ads, best raw spread, limits, payment methods, advertiser finish rate, and order count |
+| **P2P Arb** | USDT/PHP P2P cycle command center with route sizing, net profit estimate, route grade, warnings, and journal |
 | **Settings** | Change leverage, TP%, SL on/off, capital, monthly contribution, max hold days, and view the next 12 contribution markers |
 
 ---
@@ -102,6 +102,7 @@ tradingbot23/
 │   └── modules/
 │       ├── data_fetcher.py        # CoinGecko API — rankings, 24h changes, snapshots
 │       ├── futures_trader.py      # Paper futures engine with leverage, funding, liquidation
+│       ├── p2p_arbitrage.py       # P2P route sizing, scoring, and manual cycle journal
 │       ├── p2p_monitor.py         # Read-only Binance P2P USDT/PHP spread monitor
 │       ├── strategy.py            # Basket logic, dip detection, fill_empty_slots
 │       ├── telegram_notifier.py   # Trade alerts via Telegram bot
@@ -197,18 +198,20 @@ TradingBot23 is futures-only by design. Spot support was removed because spot/OC
 
 ---
 
-## P2P Arbitrage Monitor
+## P2P Cycle Command Center
 
-The **P2P Arb** tab is a read-only USDT/PHP monitor. It pulls Binance P2P ads once when opened, then refreshes every 60 seconds while the tab is selected.
+The **P2P Arb** tab is a read-only USDT/PHP cycle command center. It pulls Binance P2P ads once when opened, then refreshes every 60 seconds while the tab is selected.
 
 | Field | Detail |
 |---|---|
 | Best Buy USDT | Lowest seller price to buy USDT with PHP |
 | Best Sell USDT | Highest buyer price to sell USDT for PHP |
-| Raw Spread | Best sell price minus best buy price |
+| Route Calculator | Pairs buy/sell ads, caps size by capital and ad limits, and estimates net PHP profit |
+| Route Grade | A/B/C/WATCH/REVIEW label based on estimated return and counterparty filters |
+| Journal | Logs the top route to `data/p2p_cycle_journal.csv` for manual cycle tracking |
 | Tables | Top buy/sell ads with PHP limits, USDT available, payment methods, advertiser, finish rate, and order count |
 
-The spread is informational only. It does not include Binance availability changes, payment transfer time, payment-method risk, or manual execution slippage.
+The route estimate is informational only. It does not place orders and it does not verify fiat payment receipt. Manual fiat verification is required before releasing crypto or treating any cycle as complete.
 
 ---
 
