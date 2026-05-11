@@ -734,11 +734,11 @@ class Dashboard:
         )
 
         journal = tk.Frame(body, bg="#0d1117")
-        journal.pack(fill="both", expand=True, pady=(0, 4))
+        journal.pack(fill="x", expand=False, pady=(0, 4))
         ttk.Label(journal, text="RECENT P2P CYCLE JOURNAL", style="Header.TLabel",
                   background="#0d1117").pack(anchor="w", pady=(0, 3))
         journal_cols = ("time", "status", "route", "size", "profit", "notes")
-        self.p2p_journal_tree = ttk.Treeview(journal, columns=journal_cols, show="headings", height=4)
+        self.p2p_journal_tree = ttk.Treeview(journal, columns=journal_cols, show="headings", height=3)
         for col, heading, width in [
             ("time", "TIME", 120),
             ("status", "STATUS", 85),
@@ -751,6 +751,29 @@ class Dashboard:
             self.p2p_journal_tree.column(col, width=width, anchor="center")
         self.p2p_journal_tree.pack(fill="both", expand=True)
         self._refresh_p2p_journal()
+
+        tx = tk.Frame(body, bg="#0d1117")
+        tx.pack(fill="both", expand=True, pady=(0, 4))
+        ttk.Label(tx, text="P2P PAPER TRANSACTION HISTORY", style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(0, 3))
+        tx_cols = ("time", "type", "status", "php", "usdt", "profit", "balance", "notes")
+        self.p2p_tx_tree = ttk.Treeview(tx, columns=tx_cols, show="headings", height=5)
+        for col, heading, width in [
+            ("time", "TIME", 120),
+            ("type", "TYPE", 95),
+            ("status", "STATUS", 75),
+            ("php", "PHP", 90),
+            ("usdt", "USDT", 90),
+            ("profit", "P&L PHP", 90),
+            ("balance", "BALANCE", 95),
+            ("notes", "NOTES", 300),
+        ]:
+            self.p2p_tx_tree.heading(col, text=heading)
+            self.p2p_tx_tree.column(col, width=width, anchor="center")
+        self.p2p_tx_tree.tag_configure("profit", foreground="#3fb950")
+        self.p2p_tx_tree.tag_configure("loss", foreground="#f85149")
+        self.p2p_tx_tree.pack(fill="both", expand=True)
+        self._refresh_p2p_transactions()
 
     def _build_p2p_table(self, parent, title: str, height: int):
         section = tk.Frame(parent, bg="#0d1117")
@@ -1131,6 +1154,7 @@ class Dashboard:
         else:
             self._p2p_hold_usdt_var.set("--")
             self._p2p_hold_pnl_var.set(f"Cash {cash:,.0f}")
+        self._refresh_p2p_transactions(state)
 
     @staticmethod
     def _p2p_capital_status(delta: float, message: str) -> str:
@@ -1167,6 +1191,36 @@ class Dashboard:
                 f"{self._num(row.get('size_php')):,.0f}",
                 f"{self._num(row.get('expected_profit_php')):+,.0f}",
                 self._clip_text(row.get("notes", "") or row.get("warnings", ""), 48),
+            ))
+
+    def _refresh_p2p_transactions(self, state: dict | None = None):
+        if not hasattr(self, "p2p_tx_tree"):
+            return
+        for item in self.p2p_tx_tree.get_children():
+            self.p2p_tx_tree.delete(item)
+
+        if state is None:
+            starting_php = 500_000
+            if hasattr(self, "_p2p_capital_php"):
+                starting_php = self._num(self._p2p_capital_php.get(), 500_000)
+            rows = self.p2p_paper.recent_transactions(limit=14, starting_php=starting_php)
+        else:
+            rows = list(state.get("transactions", []))[-14:]
+
+        for row in reversed(rows):
+            ts = row.get("timestamp", "")
+            time_text = ts[:16].replace("T", " ")
+            profit = self._num(row.get("profit_php"), 0.0)
+            tags = ("profit",) if profit > 0 else ("loss",) if profit < 0 else ()
+            self.p2p_tx_tree.insert("", "end", tags=tags, values=(
+                time_text,
+                str(row.get("type", "")).replace("_", " "),
+                row.get("status", ""),
+                f"{self._num(row.get('amount_php')):,.0f}",
+                f"{self._num(row.get('usdt')):,.2f}" if self._num(row.get("usdt")) else "--",
+                f"{profit:+,.0f}" if profit else "--",
+                f"{self._num(row.get('balance_after_php')):,.0f}",
+                self._clip_text(row.get("notes", ""), 42),
             ))
 
     def _fill_p2p_tree(self, tree, ads):

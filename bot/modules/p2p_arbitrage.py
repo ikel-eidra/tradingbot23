@@ -192,8 +192,32 @@ class P2PJournal:
 class P2PPaperArb:
     """Persistent paper balance for simulated P2P arbitrage cycles."""
 
-    def __init__(self, path: Path | None = None):
+    MAX_TRANSACTIONS = 1_000
+    TRANSACTION_FIELDS = [
+        "timestamp",
+        "type",
+        "status",
+        "amount_php",
+        "cash_delta_php",
+        "usdt",
+        "avg_buy_price",
+        "avg_sell_price",
+        "profit_php",
+        "profit_pct",
+        "balance_after_php",
+        "notes",
+    ]
+
+    def __init__(self, path: Path | None = None, transaction_path: Path | None = None):
         self.path = path or (config.DATA_DIR / "p2p_paper_arb.json")
+        self.transaction_path = (
+            transaction_path
+            or (
+                self.path.with_name("p2p_transaction_history.csv")
+                if path
+                else config.DATA_DIR / "p2p_transaction_history.csv"
+            )
+        )
 
     def state(self, starting_php: float = 500_000.0) -> dict:
         if self.path.exists():
@@ -217,7 +241,18 @@ class P2PPaperArb:
             "cycles": [],
             "hold_position": None,
             "hold_trades": [],
+            "transactions": [],
         }
+        self._append_transaction(
+            state,
+            kind="RESET",
+            status="SET",
+            amount_php=float(starting_php),
+            cash_delta_php=float(starting_php),
+            balance_after_php=float(starting_php),
+            notes="Paper account reset",
+            timestamp=now,
+        )
         self._save(state)
         return state
 
@@ -245,10 +280,21 @@ class P2PPaperArb:
         cash = float(state.get("cash_php", state.get("balance_php", previous)))
         if delta > 0:
             state["cash_php"] = cash + delta
+            notes = "Paper capital increased"
         else:
             state["cash_php"] = self._withdraw_equity_from_state(state, -delta, cash)
+            notes = "Paper capital decreased"
 
         state["balance_php"] = self._equity_at_cost(state)
+        self._append_transaction(
+            state,
+            kind="CAPITAL",
+            status="ADJUSTED",
+            amount_php=abs(delta),
+            cash_delta_php=delta,
+            balance_after_php=state["balance_php"],
+            notes=notes,
+        )
         self._save(state)
         return state, delta
 
@@ -292,6 +338,21 @@ class P2PPaperArb:
         state["cash_php"] = cash_after
         state["realized_profit_php"] = float(state.get("realized_profit_php", 0.0)) + sweep.profit_php
         state["balance_php"] = self._equity_at_cost(state)
+        self._append_transaction(
+            state,
+            kind="PAPER_CYCLE",
+            status="FILLED",
+            amount_php=sweep.size_php,
+            cash_delta_php=sweep.profit_php,
+            usdt=sweep.buy_usdt,
+            avg_buy_price=sweep.avg_buy_price,
+            avg_sell_price=sweep.avg_sell_price,
+            profit_php=sweep.profit_php,
+            profit_pct=sweep.profit_pct,
+            balance_after_php=state["balance_php"],
+            notes="; ".join(sweep.warnings),
+            timestamp=cycle.timestamp,
+        )
         self._save(state)
         return state, cycle
 
@@ -321,6 +382,18 @@ class P2PPaperArb:
         state["cash_php"] = cash - entry.cost_php
         state["hold_position"] = position
         state["balance_php"] = self._equity_at_cost(state)
+        self._append_transaction(
+            state,
+            kind="HOLD_BUY",
+            status="OPEN",
+            amount_php=entry.cost_php,
+            cash_delta_php=-entry.cost_php,
+            usdt=entry.buy_usdt,
+            avg_buy_price=entry.avg_buy_price,
+            balance_after_php=state["balance_php"],
+            notes="; ".join(entry.warnings),
+            timestamp=position["opened_at"],
+        )
         self._save(state)
         return state, position
 
@@ -371,10 +444,29 @@ class P2PPaperArb:
             state["realized_profit_php"] = (
                 float(state.get("realized_profit_php", 0.0)) + evaluation.profit_php
             )
+            self._append_transaction(
+                state,
+                kind="HOLD_SELL",
+                status="CLOSED",
+                amount_php=evaluation.sell_php,
+                cash_delta_php=evaluation.sell_php - settings.local_buffer_php,
+                usdt=evaluation.usdt,
+                avg_buy_price=evaluation.avg_buy_price,
+                avg_sell_price=evaluation.avg_sell_price,
+                profit_php=evaluation.profit_php,
+                profit_pct=evaluation.profit_pct,
+                balance_after_php=self._equity_at_cost(state),
+                notes="; ".join(evaluation.warnings),
+                timestamp=evaluation.timestamp,
+            )
 
         state["balance_php"] = self._equity_at_cost(state)
         self._save(state)
         return state, evaluation
+
+    def recent_transactions(self, limit: int = 50, starting_php: float = 500_000.0) -> list[dict]:
+        state = self.state(starting_php)
+        return list(state.get("transactions", []))[-limit:]
 
     @staticmethod
     def _equity_at_cost(state: dict) -> float:
@@ -429,12 +521,148 @@ class P2PPaperArb:
         state.setdefault("cycles", [])
         state.setdefault("hold_position", None)
         state.setdefault("hold_trades", [])
+        if "transactions" not in state:
+            state["transactions"] = self._legacy_transactions(state)
         state["balance_php"] = self._equity_at_cost(state)
         return state
 
     def _save(self, state: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    def _append_transaction(
+        self,
+        state: dict,
+        *,
+        kind: str,
+        status: str,
+        amount_php: float = 0.0,
+        cash_delta_php: float = 0.0,
+        usdt: float = 0.0,
+        avg_buy_price: float = 0.0,
+        avg_sell_price: float = 0.0,
+        profit_php: float = 0.0,
+        profit_pct: float = 0.0,
+        balance_after_php: float | None = None,
+        notes: str = "",
+        timestamp: str | None = None,
+    ) -> None:
+        rows = list(state.get("transactions", []))
+        row = {
+            "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
+            "type": kind,
+            "status": status,
+            "amount_php": float(amount_php),
+            "cash_delta_php": float(cash_delta_php),
+            "usdt": float(usdt),
+            "avg_buy_price": float(avg_buy_price),
+            "avg_sell_price": float(avg_sell_price),
+            "profit_php": float(profit_php),
+            "profit_pct": float(profit_pct),
+            "balance_after_php": float(
+                self._equity_at_cost(state) if balance_after_php is None else balance_after_php
+            ),
+            "notes": notes,
+        }
+        rows.append(row)
+        state["transactions"] = rows[-self.MAX_TRANSACTIONS:]
+        self._append_transaction_csv(row)
+
+    def _append_transaction_csv(self, row: dict) -> None:
+        self.transaction_path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not self.transaction_path.exists()
+        with open(self.transaction_path, "a", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=self.TRANSACTION_FIELDS)
+            if write_header:
+                writer.writeheader()
+            writer.writerow({
+                field: row.get(field, "")
+                for field in self.TRANSACTION_FIELDS
+            })
+
+    def _legacy_transactions(self, state: dict) -> list[dict]:
+        rows: list[dict] = []
+        start = float(state.get("starting_php", 0.0))
+        rows.append({
+            "timestamp": state.get("started_at", datetime.now(timezone.utc).isoformat()),
+            "type": "RESET",
+            "status": "SET",
+            "amount_php": start,
+            "cash_delta_php": start,
+            "usdt": 0.0,
+            "avg_buy_price": 0.0,
+            "avg_sell_price": 0.0,
+            "profit_php": 0.0,
+            "profit_pct": 0.0,
+            "balance_after_php": start,
+            "notes": "Imported from existing paper account",
+        })
+
+        for cycle in state.get("cycles", []):
+            rows.append({
+                "timestamp": cycle.get("timestamp", ""),
+                "type": "PAPER_CYCLE",
+                "status": "FILLED",
+                "amount_php": float(cycle.get("size_php", 0.0)),
+                "cash_delta_php": float(cycle.get("profit_php", 0.0)),
+                "usdt": 0.0,
+                "avg_buy_price": float(cycle.get("avg_buy_price", 0.0)),
+                "avg_sell_price": float(cycle.get("avg_sell_price", 0.0)),
+                "profit_php": float(cycle.get("profit_php", 0.0)),
+                "profit_pct": float(cycle.get("profit_pct", 0.0)),
+                "balance_after_php": float(cycle.get("balance_after_php", 0.0)),
+                "notes": "; ".join(cycle.get("warnings", [])),
+            })
+
+        for trade in state.get("hold_trades", []):
+            rows.append({
+                "timestamp": trade.get("opened_at", ""),
+                "type": "HOLD_BUY",
+                "status": "OPEN",
+                "amount_php": float(trade.get("cost_php", 0.0)),
+                "cash_delta_php": -float(trade.get("cost_php", 0.0)),
+                "usdt": float(trade.get("usdt", 0.0)),
+                "avg_buy_price": float(trade.get("avg_buy_price", 0.0)),
+                "avg_sell_price": 0.0,
+                "profit_php": 0.0,
+                "profit_pct": 0.0,
+                "balance_after_php": 0.0,
+                "notes": "Imported closed hold entry",
+            })
+            rows.append({
+                "timestamp": trade.get("closed_at", ""),
+                "type": "HOLD_SELL",
+                "status": "CLOSED",
+                "amount_php": float(trade.get("sell_php", 0.0)),
+                "cash_delta_php": float(trade.get("sell_php", 0.0)),
+                "usdt": float(trade.get("usdt", 0.0)),
+                "avg_buy_price": float(trade.get("avg_buy_price", 0.0)),
+                "avg_sell_price": float(trade.get("avg_sell_price", 0.0)),
+                "profit_php": float(trade.get("profit_php", 0.0)),
+                "profit_pct": float(trade.get("profit_pct", 0.0)),
+                "balance_after_php": 0.0,
+                "notes": "; ".join(trade.get("warnings", [])),
+            })
+
+        hold = state.get("hold_position") or {}
+        if hold:
+            rows.append({
+                "timestamp": hold.get("opened_at", ""),
+                "type": "HOLD_BUY",
+                "status": "OPEN",
+                "amount_php": float(hold.get("cost_php", 0.0)),
+                "cash_delta_php": -float(hold.get("cost_php", 0.0)),
+                "usdt": float(hold.get("usdt", 0.0)),
+                "avg_buy_price": float(hold.get("avg_buy_price", 0.0)),
+                "avg_sell_price": 0.0,
+                "profit_php": float(hold.get("last_profit_php", 0.0) or 0.0),
+                "profit_pct": float(hold.get("last_profit_pct", 0.0) or 0.0),
+                "balance_after_php": self._equity_at_cost(state),
+                "notes": "; ".join(hold.get("warnings", [])),
+            })
+
+        rows.sort(key=lambda row: row.get("timestamp", ""))
+        return rows[-self.MAX_TRANSACTIONS:]
 
 
 def build_p2p_routes(

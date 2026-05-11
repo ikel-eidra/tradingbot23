@@ -1,5 +1,6 @@
 """Tests for P2P arbitrage route scoring."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -165,10 +166,14 @@ class TestP2PArbitrage(unittest.TestCase):
             paper = P2PPaperArb(path=Path(tmpdir) / "paper.json")
             state, cycle = paper.execute_if_profitable(sweep, min_profit_pct=0.1, starting_php=500_000)
             reloaded = paper.state()
+            csv_text = (Path(tmpdir) / "p2p_transaction_history.csv").read_text(encoding="utf-8")
 
         self.assertIsNotNone(cycle)
         self.assertGreater(state["balance_php"], 500_000)
         self.assertEqual(len(reloaded["cycles"]), 1)
+        self.assertEqual(reloaded["transactions"][-1]["type"], "PAPER_CYCLE")
+        self.assertGreater(float(reloaded["transactions"][-1]["profit_php"]), 0)
+        self.assertIn("PAPER_CYCLE", csv_text)
 
     def test_paper_arb_syncs_starting_capital_down_to_cash(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -182,6 +187,8 @@ class TestP2PArbitrage(unittest.TestCase):
         self.assertAlmostEqual(state["cash_php"], 100_000)
         self.assertAlmostEqual(state["balance_php"], 100_000)
         self.assertAlmostEqual(reloaded["balance_php"], 100_000)
+        self.assertEqual(reloaded["transactions"][-1]["type"], "CAPITAL")
+        self.assertAlmostEqual(reloaded["transactions"][-1]["cash_delta_php"], -400_000)
 
     def test_paper_arb_syncs_starting_capital_down_scales_open_hold(self):
         buy_snapshot = P2PSnapshot(
@@ -211,6 +218,7 @@ class TestP2PArbitrage(unittest.TestCase):
         self.assertAlmostEqual(state["balance_php"], 100_000)
         self.assertAlmostEqual(hold["cost_php"], 100_000)
         self.assertAlmostEqual(hold["usdt"], entry.buy_usdt * 0.2)
+        self.assertEqual(state["transactions"][-1]["type"], "CAPITAL")
 
     def test_hold_buy_waits_then_sells_at_profit_threshold(self):
         buy_snapshot = P2PSnapshot(
@@ -260,6 +268,39 @@ class TestP2PArbitrage(unittest.TestCase):
         self.assertIsNone(state["hold_position"])
         self.assertGreater(state["cash_php"], 100_000)
         self.assertEqual(len(reloaded["hold_trades"]), 1)
+        self.assertIn("HOLD_BUY", [row["type"] for row in reloaded["transactions"]])
+        self.assertEqual(reloaded["transactions"][-1]["type"], "HOLD_SELL")
+
+    def test_legacy_paper_state_gets_transaction_history(self):
+        legacy = {
+            "started_at": "2026-05-10T00:00:00+00:00",
+            "starting_php": 100_000.0,
+            "balance_php": 101_000.0,
+            "cash_php": 101_000.0,
+            "realized_profit_php": 1_000.0,
+            "cycles": [
+                {
+                    "timestamp": "2026-05-10T01:00:00+00:00",
+                    "size_php": 100_000.0,
+                    "profit_php": 1_000.0,
+                    "profit_pct": 1.0,
+                    "balance_after_php": 101_000.0,
+                    "avg_buy_price": 60.0,
+                    "avg_sell_price": 60.6,
+                    "warnings": ["ok"],
+                }
+            ],
+            "hold_position": None,
+            "hold_trades": [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "paper.json"
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            paper = P2PPaperArb(path=path)
+            state = paper.state(100_000)
+
+        self.assertEqual([row["type"] for row in state["transactions"]], ["RESET", "PAPER_CYCLE"])
 
 
 if __name__ == "__main__":
