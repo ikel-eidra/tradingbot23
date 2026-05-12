@@ -205,9 +205,9 @@ TradingBot23 is futures-only by design. Spot support was removed because spot/OC
 
 ---
 
-## P2P Cycle Command Center
+## P2P Arb And History
 
-The **P2P Arb** tab is a read-only USDT/PHP cycle command center. It pulls Binance P2P ads once when opened, then refreshes every 60 seconds while the tab is selected.
+The **P2P Arb** tab uses live Binance P2P USDT/PHP listings for both paper simulation and live monitoring. It pulls ads once when opened, then refreshes every 60 seconds while the tab is selected. The **P2P History** tab shows the paper transaction ledger and watch-route journal.
 
 | Field | Detail |
 |---|---|
@@ -215,9 +215,9 @@ The **P2P Arb** tab is a read-only USDT/PHP cycle command center. It pulls Binan
 | Best Sell USDT | Highest buyer price to sell USDT for PHP |
 | Route Calculator | Pairs buy/sell ads, caps size by capital and ad limits, and estimates net PHP profit |
 | 500K Sweep | Simulates splitting a PHP amount across multiple real buy/sell listings with weighted average prices |
-| Paper Arb | Compounds a local paper PHP balance from profitable depth sweeps; stored in `data/p2p_paper_arb.json` |
+| Paper Arb | Compounds a local paper PHP balance from profitable live-listing depth sweeps; stored in `data/p2p_paper_arb.json` |
 | Paper Hold | Buys paper USDT now, keeps one open inventory position, and auto-sells when the configured net profit threshold is reached |
-| Live Assist | Can alert Telegram, auto-log watchlist routes, paper-fill profitable sweeps, and paper-check hold exits |
+| Live Assist | Can alert Telegram and auto-log watchlist routes without changing the paper balance |
 | Route Grade | A/B/C/WATCH/REVIEW label based on estimated return and counterparty filters |
 | Journal | Logs the top route to `data/p2p_cycle_journal.csv` for manual cycle tracking |
 | Transaction History | Records reset, capital adjustment, paper cycle, hold buy, and hold sell rows in `data/p2p_transaction_history.csv` |
@@ -229,13 +229,14 @@ The route and paper-hold estimates are informational only. The app does not plac
 
 | Mode | Action | What Changes |
 |---|---|---|
-| Paper Sim | Run Instant Paper Cycle | Simulates buy and sell from the same snapshot. If net profit meets the threshold, PHP profit is added immediately and no USDT remains open. |
-| Paper Sim | Open Paper Hold | Simulates buying USDT now. Paper cash goes down, hold USDT appears, and the app waits for a later sell-side quote. |
-| Paper Sim | Check / Sell Hold | Marks the open paper hold against current buyer prices. It closes only when the configured net profit threshold is reached. |
+| Paper Sim (Live Data) | Paper Buy+Sell | Simulates buy and sell from the same live listing snapshot. If net profit meets the threshold, PHP profit is added immediately and no USDT remains open. |
+| Paper Sim (Live Data) | Paper Buy Hold | Simulates buying USDT from current live seller ads. Paper cash goes down, hold USDT appears, and the app waits for a later sell-side quote. |
+| Paper Sim (Live Data) | Check/Sell Hold | Marks the open paper hold against current live buyer prices. It closes only when the configured net profit threshold is reached. |
+| Paper Sim (Live Data) | TG Alerts | Sends paper buy/sell/hold events to Telegram when enabled. |
 | Live Assist | Send Live Snapshot | Sends the current P2P dashboard to Telegram. No balances change. |
 | Live Assist | Log Watch Route | Saves the current top route to `data/p2p_cycle_journal.csv`. No balances change. |
 
-Use **Paper Sim** to test compounding behavior. Use **Live Assist** when watching real listings and manually executing outside the app.
+Use **Paper Sim (Live Data)** to test compounding behavior against real listings without placing orders. Use **Live Assist** when watching real listings and manually executing outside the app.
 
 ---
 

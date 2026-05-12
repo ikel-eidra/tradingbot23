@@ -216,12 +216,14 @@ class Dashboard:
         charts_tab   = tk.Frame(nb, bg="#0d1117")
         history_tab  = tk.Frame(nb, bg="#0d1117")
         p2p_tab      = tk.Frame(nb, bg="#0d1117")
+        p2p_history_tab = tk.Frame(nb, bg="#0d1117")
         settings_tab = tk.Frame(nb, bg="#0d1117")
         self.settings_tab = settings_tab
         nb.add(open_tab,     text="  Open  ")
         nb.add(charts_tab,   text="  Charts  ")
         nb.add(history_tab,  text="  History  ")
         nb.add(p2p_tab,      text="  P2P Arb  ")
+        nb.add(p2p_history_tab, text="  P2P History  ")
         nb.add(settings_tab, text="  Settings  ")
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
@@ -229,6 +231,7 @@ class Dashboard:
         self._build_charts_tab(charts_tab)
         self._build_history_tab(history_tab)
         self._build_p2p_tab(p2p_tab)
+        self._build_p2p_history_tab(p2p_history_tab)
         self._build_settings_tab(settings_tab)
         if not self._settings_confirmed:
             nb.select(settings_tab)
@@ -319,7 +322,8 @@ class Dashboard:
         return (
             "<b>TradingBot23 Live Assist Scope</b>\n"
             "Futures: paper portfolio, open positions, trade stats, and daily summary alerts.\n"
-            "P2P: live USDT/PHP scan, spread scoring, Telegram alerts, watchlist log, paper ledger, and hold-exit checks.\n\n"
+            "P2P Paper Sim: uses live Binance listings, updates paper ledger, and can send Telegram paper-event alerts.\n"
+            "P2P Live Assist: scan, spread score, Telegram alert, and watchlist log only.\n\n"
             "Manual in real P2P: choose counterparty, send fiat, confirm payment, verify receipt, release crypto, and handle disputes.\n"
             "Commands: /dashboard, /p2p, /info"
         )
@@ -772,7 +776,7 @@ class Dashboard:
 
         mode_group = tk.Frame(controls, bg="#0d1117")
         mode_group.pack(side="left", padx=(0, 12), pady=(13, 0))
-        for value, text in [("paper", "Paper Sim"), ("live", "Live Assist")]:
+        for value, text in [("paper", "Paper Sim (Live Data)"), ("live", "Live Assist")]:
             tk.Radiobutton(
                 mode_group,
                 text=text,
@@ -794,14 +798,22 @@ class Dashboard:
         action_bar.pack(fill="x", pady=(0, 8))
 
         self._p2p_paper_actions = tk.Frame(action_bar, bg="#0d1117")
-        ttk.Button(self._p2p_paper_actions, text="Run Instant Paper Cycle", style="Btn.TButton",
+        ttk.Button(self._p2p_paper_actions, text="Paper Buy+Sell", style="Btn.TButton",
                    command=self._paper_cycle_now).pack(side="left", padx=(0, 6))
-        ttk.Button(self._p2p_paper_actions, text="Open Paper Hold", style="Btn.TButton",
+        ttk.Button(self._p2p_paper_actions, text="Paper Buy Hold", style="Btn.TButton",
                    command=self._paper_hold_buy_now).pack(side="left", padx=(0, 6))
-        ttk.Button(self._p2p_paper_actions, text="Check / Sell Hold", style="Btn.TButton",
+        ttk.Button(self._p2p_paper_actions, text="Check/Sell Hold", style="Btn.TButton",
                    command=self._check_p2p_hold_sell).pack(side="left", padx=(0, 6))
         ttk.Button(self._p2p_paper_actions, text="Reset Paper", style="Btn.TButton",
-                   command=self._reset_p2p_paper).pack(side="left", padx=(0, 12))
+                   command=self._reset_p2p_paper).pack(side="left", padx=(0, 6))
+        ttk.Button(self._p2p_paper_actions, text="Send TG", style="Btn.TButton",
+                   command=self._send_p2p_live_snapshot).pack(side="left", padx=(0, 12))
+        self._p2p_paper_alert = self._p2p_checkbutton(
+            self._p2p_paper_actions,
+            text="TG Alerts",
+            variable=self._p2p_auto_alert,
+        )
+        self._p2p_paper_alert.pack(side="left", padx=(0, 10))
         self._p2p_paper_auto = self._p2p_checkbutton(
             self._p2p_paper_actions,
             text="Auto Cycle",
@@ -957,6 +969,68 @@ class Dashboard:
         self.p2p_tx_tree.pack(fill="both", expand=True)
         self._refresh_p2p_transactions()
 
+    def _build_p2p_history_tab(self, parent):
+        body = tk.Frame(parent, bg="#0d1117", padx=15, pady=12)
+        body.pack(fill="both", expand=True)
+
+        top = tk.Frame(body, bg="#0d1117")
+        top.pack(fill="x", pady=(0, 8))
+        ttk.Label(top, text="P2P PAPER HISTORY", style="Header.TLabel",
+                  background="#0d1117").pack(side="left")
+        ttk.Button(top, text="Refresh", style="Btn.TButton",
+                   command=self._refresh_p2p_history_tab).pack(side="right")
+
+        self._p2p_history_summary_var = tk.StringVar(value="")
+        ttk.Label(body, textvariable=self._p2p_history_summary_var,
+                  foreground="#8b949e", background="#0d1117",
+                  font=("Consolas", 9)).pack(fill="x", anchor="w", pady=(0, 8))
+
+        tx = tk.Frame(body, bg="#0d1117")
+        tx.pack(fill="both", expand=True, pady=(0, 10))
+        ttk.Label(tx, text="P2P PAPER TRANSACTION HISTORY", style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(0, 3))
+        tx_cols = ("time", "type", "status", "php", "usdt", "profit", "balance", "notes")
+        self.p2p_history_tx_tree = ttk.Treeview(tx, columns=tx_cols, show="headings", height=13)
+        for col, heading, width in [
+            ("time", "TIME", 135),
+            ("type", "TYPE", 110),
+            ("status", "STATUS", 90),
+            ("php", "PHP", 105),
+            ("usdt", "USDT", 105),
+            ("profit", "P&L PHP", 105),
+            ("balance", "BALANCE", 110),
+            ("notes", "NOTES", 430),
+        ]:
+            self.p2p_history_tx_tree.heading(col, text=heading)
+            self.p2p_history_tx_tree.column(col, width=width, anchor="center")
+        self.p2p_history_tx_tree.tag_configure("profit", foreground="#3fb950")
+        self.p2p_history_tx_tree.tag_configure("loss", foreground="#f85149")
+        tx_vsb = ttk.Scrollbar(tx, orient="vertical", command=self.p2p_history_tx_tree.yview)
+        self.p2p_history_tx_tree.configure(yscrollcommand=tx_vsb.set)
+        self.p2p_history_tx_tree.pack(side="left", fill="both", expand=True)
+        tx_vsb.pack(side="right", fill="y")
+
+        journal = tk.Frame(body, bg="#0d1117")
+        journal.pack(fill="both", expand=True)
+        ttk.Label(journal, text="P2P WATCH ROUTE JOURNAL", style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(0, 3))
+        journal_cols = ("time", "status", "route", "size", "profit", "notes")
+        self.p2p_history_journal_tree = ttk.Treeview(
+            journal, columns=journal_cols, show="headings", height=7,
+        )
+        for col, heading, width in [
+            ("time", "TIME", 135),
+            ("status", "STATUS", 95),
+            ("route", "ROUTE", 145),
+            ("size", "SIZE PHP", 105),
+            ("profit", "EXP PHP", 105),
+            ("notes", "NOTES", 520),
+        ]:
+            self.p2p_history_journal_tree.heading(col, text=heading)
+            self.p2p_history_journal_tree.column(col, width=width, anchor="center")
+        self.p2p_history_journal_tree.pack(fill="both", expand=True)
+        self._refresh_p2p_history_tab()
+
     def _p2p_checkbutton(self, parent, text: str, variable: tk.BooleanVar):
         return tk.Checkbutton(
             parent,
@@ -990,7 +1064,7 @@ class Dashboard:
             self._p2p_paper_actions.pack(side="left", fill="x")
             if hasattr(self, "_p2p_status_var"):
                 self._p2p_status_var.set(
-                    "Paper Sim: Instant Cycle closes immediately; Paper Hold keeps USDT until target."
+                    "Paper Sim uses live Binance P2P listings. Buy+Sell closes now; Buy Hold waits for target."
                 )
 
     def _build_p2p_table(self, parent, title: str, height: int):
@@ -1290,6 +1364,17 @@ class Dashboard:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _send_p2p_paper_event(self, title: str, lines: list[str]):
+        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+            return
+        if not hasattr(self, "_p2p_auto_alert") or not self._p2p_auto_alert.get():
+            return
+        text = "\n".join([
+            f"🧾 <b>TradingBot23 P2P Paper - {tg.escape_html(title)}</b>",
+            *lines,
+        ])
+        tg.send_dashboard_text(text)
+
     def _paper_cycle_now(self):
         if not self._p2p_last_snapshot:
             self._refresh_p2p()
@@ -1342,6 +1427,15 @@ class Dashboard:
                 f"Paper hold opened: {entry.buy_usdt:,.2f} USDT @ "
                 f"{entry.avg_buy_price:,.2f} | Target +{settings.min_profit_pct:.3f}% | {warnings}"
             )
+            self._send_p2p_paper_event(
+                "Paper Hold Opened",
+                [
+                    f"Bought: <b>{entry.buy_usdt:,.2f} USDT</b>",
+                    f"Cost: <b>{entry.cost_php:,.0f} PHP</b> @ {entry.avg_buy_price:,.2f}",
+                    f"Target: <b>+{settings.min_profit_pct:.3f}% net</b>",
+                    f"Warnings: {tg.escape_html(warnings)}",
+                ],
+            )
         else:
             self._p2p_status_var.set("Hold buy skipped: insufficient free cash or open hold exists.")
 
@@ -1380,6 +1474,14 @@ class Dashboard:
             self._p2p_status_var.set(
                 f"{source} sold: {evaluation.profit_php:+,.0f} PHP "
                 f"({evaluation.profit_pct:+.3f}%) @ {evaluation.avg_sell_price:,.2f}"
+            )
+            self._send_p2p_paper_event(
+                "Paper Hold Sold",
+                [
+                    f"Sold: <b>{evaluation.sold_usdt:,.2f} USDT</b>",
+                    f"Avg sell: <b>{evaluation.avg_sell_price:,.2f} PHP</b>",
+                    f"Net P&L: <b>{evaluation.profit_php:+,.0f} PHP ({evaluation.profit_pct:+.3f}%)</b>",
+                ],
             )
         elif not auto:
             warnings = "; ".join(evaluation.warnings) if evaluation.warnings else "waiting"
@@ -1427,6 +1529,17 @@ class Dashboard:
             self._p2p_status_var.set(
                 f"{source} cycle: {cycle.profit_php:+,.0f} PHP | "
                 f"Balance {cycle.balance_after_php:,.0f} PHP"
+            )
+            warnings = "; ".join(cycle.warnings) if cycle.warnings else "ok"
+            self._send_p2p_paper_event(
+                "Paper Buy+Sell Filled",
+                [
+                    f"Size: <b>{cycle.size_php:,.0f} PHP</b>",
+                    f"Avg buy/sell: {cycle.avg_buy_price:,.2f} / {cycle.avg_sell_price:,.2f}",
+                    f"Net P&L: <b>{cycle.profit_php:+,.0f} PHP ({cycle.profit_pct:+.3f}%)</b>",
+                    f"Balance: <b>{cycle.balance_after_php:,.0f} PHP</b>",
+                    f"Warnings: {tg.escape_html(warnings)}",
+                ],
             )
         elif not auto:
             self._p2p_status_var.set("Paper cycle skipped: sweep is below profit filter.")
@@ -1491,43 +1604,53 @@ class Dashboard:
         self._p2p_status_var.set(f"Logged top P2P route to {path.name}.")
 
     def _refresh_p2p_journal(self):
-        if not hasattr(self, "p2p_journal_tree"):
-            return
-        for item in self.p2p_journal_tree.get_children():
-            self.p2p_journal_tree.delete(item)
+        if hasattr(self, "p2p_journal_tree"):
+            self._fill_p2p_journal_tree(self.p2p_journal_tree, self.p2p_journal.recent(limit=8), 48)
+        if hasattr(self, "p2p_history_journal_tree"):
+            self._fill_p2p_journal_tree(
+                self.p2p_history_journal_tree,
+                self.p2p_journal.recent(limit=100),
+                78,
+            )
 
-        for row in reversed(self.p2p_journal.recent(limit=8)):
+    def _refresh_p2p_transactions(self, state: dict | None = None):
+        rows = self._p2p_transaction_rows(state=state, limit=200)
+        if hasattr(self, "p2p_tx_tree"):
+            self._fill_p2p_transactions_tree(self.p2p_tx_tree, rows[-14:], 42)
+        if hasattr(self, "p2p_history_tx_tree"):
+            self._fill_p2p_transactions_tree(self.p2p_history_tx_tree, rows, 78)
+        self._update_p2p_history_summary(state)
+
+    def _refresh_p2p_history_tab(self):
+        self._refresh_p2p_journal()
+        self._refresh_p2p_transactions()
+
+    def _fill_p2p_journal_tree(self, tree, rows, note_limit: int):
+        for item in tree.get_children():
+            tree.delete(item)
+
+        for row in reversed(rows):
             ts = row.get("timestamp", "")
             time_text = ts[:16].replace("T", " ")
-            self.p2p_journal_tree.insert("", "end", values=(
+            tree.insert("", "end", values=(
                 time_text,
                 row.get("status", ""),
                 row.get("route", ""),
                 f"{self._num(row.get('size_php')):,.0f}",
                 f"{self._num(row.get('expected_profit_php')):+,.0f}",
-                self._clip_text(row.get("notes", "") or row.get("warnings", ""), 48),
+                self._clip_text(row.get("notes", "") or row.get("warnings", ""), note_limit),
             ))
 
-    def _refresh_p2p_transactions(self, state: dict | None = None):
-        if not hasattr(self, "p2p_tx_tree"):
-            return
-        for item in self.p2p_tx_tree.get_children():
-            self.p2p_tx_tree.delete(item)
-
-        if state is None:
-            starting_php = 500_000
-            if hasattr(self, "_p2p_capital_php"):
-                starting_php = self._num(self._p2p_capital_php.get(), 500_000)
-            rows = self.p2p_paper.recent_transactions(limit=14, starting_php=starting_php)
-        else:
-            rows = list(state.get("transactions", []))[-14:]
+    def _fill_p2p_transactions_tree(self, tree, rows, note_limit: int):
+        for item in tree.get_children():
+            tree.delete(item)
 
         for row in reversed(rows):
             ts = row.get("timestamp", "")
             time_text = ts[:16].replace("T", " ")
             profit = self._num(row.get("profit_php"), 0.0)
             tags = ("profit",) if profit > 0 else ("loss",) if profit < 0 else ()
-            self.p2p_tx_tree.insert("", "end", tags=tags, values=(
+            tree.insert("", "end", tags=tags, values=(
                 time_text,
                 str(row.get("type", "")).replace("_", " "),
                 row.get("status", ""),
@@ -1535,8 +1658,31 @@ class Dashboard:
                 f"{self._num(row.get('usdt')):,.2f}" if self._num(row.get("usdt")) else "--",
                 f"{profit:+,.0f}" if profit else "--",
                 f"{self._num(row.get('balance_after_php')):,.0f}",
-                self._clip_text(row.get("notes", ""), 42),
+                self._clip_text(row.get("notes", ""), note_limit),
             ))
+
+    def _p2p_transaction_rows(self, state: dict | None = None, limit: int = 200) -> list[dict]:
+        if state is not None:
+            return list(state.get("transactions", []))[-limit:]
+        starting_php = 500_000
+        if hasattr(self, "_p2p_capital_php"):
+            starting_php = self._num(self._p2p_capital_php.get(), 500_000)
+        return self.p2p_paper.recent_transactions(limit=limit, starting_php=starting_php)
+
+    def _update_p2p_history_summary(self, state: dict | None = None):
+        if not hasattr(self, "_p2p_history_summary_var"):
+            return
+        starting_php = 500_000
+        if hasattr(self, "_p2p_capital_php"):
+            starting_php = self._num(self._p2p_capital_php.get(), 500_000)
+        state = state or self.p2p_paper.state(starting_php)
+        tx_count = len(state.get("transactions", []))
+        self._p2p_history_summary_var.set(
+            f"Paper balance {self._num(state.get('balance_php')):,.0f} PHP  |  "
+            f"Cash {self._num(state.get('cash_php')):,.0f} PHP  |  "
+            f"Realized {self._num(state.get('realized_profit_php')):+,.0f} PHP  |  "
+            f"{tx_count} transaction(s)  |  CSV: data/p2p_transaction_history.csv"
+        )
 
     def _fill_p2p_tree(self, tree, ads):
         for item in tree.get_children():
@@ -1842,6 +1988,8 @@ class Dashboard:
             self._refresh_history()
         elif tab == "P2P Arb" and self._p2p_last_snapshot is None:
             self._refresh_p2p()
+        elif tab == "P2P History":
+            self._refresh_p2p_history_tab()
 
     # ── Button handlers ────────────────────────────────────────────────────────
 

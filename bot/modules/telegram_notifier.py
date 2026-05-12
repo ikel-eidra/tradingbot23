@@ -109,7 +109,8 @@ def default_info_text() -> str:
         "/dashboard - live futures paper dashboard\n"
         "/p2p - live USDT/PHP P2P assist snapshot\n"
         "/info - automation scope and safety notes\n\n"
-        "P2P live assist can scan, score, alert, log, and update paper ledger. "
+        "P2P Paper Sim uses live listings and can send paper-event alerts. "
+        "P2P Live Assist can scan, score, alert, and log watch routes. "
         "Fiat payment, payment-completed confirmation, and crypto release stay manual."
     )
 
