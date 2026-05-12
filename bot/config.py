@@ -70,6 +70,20 @@ CHECK_INTERVAL_HOURS = float(os.getenv("CHECK_INTERVAL_HOURS", "1"))
 POSITION_CHECK_MINS = float(os.getenv("POSITION_CHECK_MINS", "5"))  # how often to check TP/SL
 AUTO_START_FUTURES = os.getenv("AUTO_START_FUTURES", "false").lower() == "true"
 SETTINGS_CONFIRMED = os.getenv("SETTINGS_CONFIRMED", "false").lower() == "true"
+BOT_PROFILE = os.getenv("BOT_PROFILE", "default").strip() or "default"
+
+# --- Professional risk controls ---
+# Zero disables each limit. These are enforced by the dashboard control loop.
+RISK_MAX_DAILY_LOSS_USD = float(os.getenv("RISK_MAX_DAILY_LOSS_USD", "0"))
+RISK_MAX_OPEN_EXPOSURE_USD = float(os.getenv("RISK_MAX_OPEN_EXPOSURE_USD", "0"))
+RISK_MAX_LOSS_STREAK = int(os.getenv("RISK_MAX_LOSS_STREAK", "0"))
+
+# --- P2P realism / sizing controls ---
+# Paper P2P still uses live listings, then applies these conservative buffers.
+P2P_MAX_ROUTE_PHP = float(os.getenv("P2P_MAX_ROUTE_PHP", "0"))
+P2P_SETTLEMENT_DELAY_MINS = float(os.getenv("P2P_SETTLEMENT_DELAY_MINS", "20"))
+P2P_CANCEL_RATE_PCT = float(os.getenv("P2P_CANCEL_RATE_PCT", "2"))
+P2P_SPREAD_DECAY_PCT = float(os.getenv("P2P_SPREAD_DECAY_PCT", "0.03"))
 
 # --- Engine selection ---
 # Futures-only. Spot trading is intentionally disabled; it needs two exchange
@@ -111,8 +125,17 @@ STABLECOIN_SYMBOLS = {
 }
 
 # --- Paths ---
-# Can be overridden per-user via env vars (multi-user Docker setup).
-DATA_DIR = Path(os.getenv("DATA_DIR", str(PROJECT_ROOT / "data")))
+# Can be overridden per-user via env vars (multi-user Docker setup). BOT_PROFILE
+# keeps beta-testers from inheriting another user's paper trades when they want
+# a clean local profile. The default profile preserves the existing data path.
+_profile_slug = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in BOT_PROFILE)
+_default_data_dir = PROJECT_ROOT / "data"
+if "DATA_DIR" in os.environ:
+    DATA_DIR = Path(os.getenv("DATA_DIR", str(_default_data_dir)))
+elif _profile_slug and _profile_slug.lower() != "default":
+    DATA_DIR = _default_data_dir / f"profile_{_profile_slug}"
+else:
+    DATA_DIR = _default_data_dir
 LOG_DIR = Path(os.getenv("LOG_DIR", str(PROJECT_ROOT / "logs")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)

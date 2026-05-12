@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable
 
 from bot import config
+from bot.modules.event_ledger import EventLedger
 from bot.modules.p2p_monitor import P2PAd, P2PSnapshot
 
 
@@ -87,6 +88,15 @@ class P2PRouteSettings:
     cross_exchange_transfer_fee_usdt: float = 1.0
     local_buffer_php: float = 0.0
     allowed_methods: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class P2PRealismSettings:
+    """Paper-only execution buffers for manual P2P settlement friction."""
+
+    settlement_delay_mins: float = 20.0
+    cancel_rate_pct: float = 2.0
+    spread_decay_pct: float = 0.03
 
 
 @dataclass(frozen=True)
@@ -208,7 +218,12 @@ class P2PPaperArb:
         "notes",
     ]
 
-    def __init__(self, path: Path | None = None, transaction_path: Path | None = None):
+    def __init__(
+        self,
+        path: Path | None = None,
+        transaction_path: Path | None = None,
+        event_path: Path | None = None,
+    ):
         self.path = path or (config.DATA_DIR / "p2p_paper_arb.json")
         self.transaction_path = (
             transaction_path
@@ -216,6 +231,14 @@ class P2PPaperArb:
                 self.path.with_name("p2p_transaction_history.csv")
                 if path
                 else config.DATA_DIR / "p2p_transaction_history.csv"
+            )
+        )
+        self.event_ledger = EventLedger(
+            event_path
+            or (
+                self.path.with_name("event_ledger.csv")
+                if path
+                else config.DATA_DIR / "event_ledger.csv"
             )
         )
 
@@ -567,6 +590,7 @@ class P2PPaperArb:
         rows.append(row)
         state["transactions"] = rows[-self.MAX_TRANSACTIONS:]
         self._append_transaction_csv(row)
+        self._append_event_ledger(row)
 
     def _append_transaction_csv(self, row: dict) -> None:
         self.transaction_path.parent.mkdir(parents=True, exist_ok=True)
@@ -579,6 +603,23 @@ class P2PPaperArb:
                 field: row.get(field, "")
                 for field in self.TRANSACTION_FIELDS
             })
+
+    def _append_event_ledger(self, row: dict) -> None:
+        try:
+            self.event_ledger.append(
+                domain="p2p",
+                event_type=str(row.get("type", "")),
+                status=str(row.get("status", "")),
+                amount=float(row.get("amount_php", 0.0) or 0.0),
+                currency="PHP",
+                pnl=float(row.get("profit_php", 0.0) or 0.0),
+                balance=float(row.get("balance_after_php", 0.0) or 0.0),
+                symbol_or_route="USDT/PHP",
+                details=str(row.get("notes", "")),
+                timestamp=str(row.get("timestamp", "")) or None,
+            )
+        except Exception:
+            pass
 
     def _legacy_transactions(self, state: dict) -> list[dict]:
         rows: list[dict] = []
@@ -749,6 +790,49 @@ def build_depth_sweep(
         warnings=warnings,
         buy_lots=tuple(buy_lots),
         sell_lots=tuple(sell_lots),
+    )
+
+
+def apply_realism_to_sweep(
+    sweep: P2PDepthSweep,
+    realism: P2PRealismSettings | None = None,
+) -> P2PDepthSweep:
+    """Apply deterministic paper buffers for manual P2P settlement friction."""
+
+    realism = realism or P2PRealismSettings()
+    delay_mins = max(0.0, float(realism.settlement_delay_mins))
+    cancel_rate = max(0.0, float(realism.cancel_rate_pct))
+    spread_decay = max(0.0, float(realism.spread_decay_pct))
+
+    spread_decay_php = sweep.size_php * (spread_decay / 100)
+    cancel_drag_php = sweep.size_php * (cancel_rate / 100) * 0.0005
+    delay_drag_php = sweep.size_php * min(delay_mins / 1440, 1.0) * 0.0002
+    total_drag_php = spread_decay_php + cancel_drag_php + delay_drag_php
+
+    profit_php = sweep.profit_php - total_drag_php
+    profit_pct = profit_php / sweep.size_php * 100 if sweep.size_php > 0 else 0.0
+    warnings = list(sweep.warnings)
+    if total_drag_php > 0:
+        warnings.append(f"realism drag {total_drag_php:.0f} PHP")
+    if delay_mins > 0:
+        warnings.append(f"settlement {delay_mins:.0f}m")
+    if cancel_rate > 0:
+        warnings.append(f"cancel risk {cancel_rate:.1f}%")
+
+    return P2PDepthSweep(
+        size_php=sweep.size_php,
+        buy_usdt=sweep.buy_usdt,
+        sell_usdt=sweep.sell_usdt,
+        sell_php=sweep.sell_php,
+        avg_buy_price=sweep.avg_buy_price,
+        avg_sell_price=sweep.avg_sell_price,
+        transfer_fee_usdt=sweep.transfer_fee_usdt,
+        profit_php=profit_php,
+        profit_pct=profit_pct,
+        grade=_grade_route(profit_pct, tuple(warnings)),
+        warnings=tuple(warnings),
+        buy_lots=sweep.buy_lots,
+        sell_lots=sweep.sell_lots,
     )
 
 

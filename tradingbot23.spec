@@ -20,6 +20,7 @@ a = Analysis(
         'bot.modules.p2p_monitor',
         'bot.modules.strategy',
         'bot.modules.backtester',
+        'bot.modules.event_ledger',
         'binance',
         'binance.client',
         'binance.exceptions',

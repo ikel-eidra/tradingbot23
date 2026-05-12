@@ -24,6 +24,7 @@ from bot import config
 
 logger = logging.getLogger(__name__)
 DashboardCallback = Callable[[], str]
+ControlCallback = Callable[[str], str]
 
 _EMOJI = {
     "tp_hit":    "✅",
@@ -48,7 +49,15 @@ def dashboard_keyboard() -> dict:
                 {"text": "Futures Dashboard", "callback_data": "dashboard:futures"},
                 {"text": "P2P Arb", "callback_data": "dashboard:p2p"},
             ],
-            [{"text": "Info", "callback_data": "dashboard:info"}],
+            [
+                {"text": "Today P&L", "callback_data": "control:today"},
+                {"text": "Export Report", "callback_data": "control:export"},
+            ],
+            [
+                {"text": "Pause Bot", "callback_data": "control:pause"},
+                {"text": "Resume Bot", "callback_data": "control:resume"},
+                {"text": "Info", "callback_data": "dashboard:info"},
+            ],
         ]
     }
 
@@ -108,6 +117,9 @@ def default_info_text() -> str:
         "<b>TradingBot23 Telegram</b>\n"
         "/dashboard - live futures paper dashboard\n"
         "/p2p - live USDT/PHP P2P assist snapshot\n"
+        "/today - today's closed P&L and P2P paper summary\n"
+        "/pause or /resume - control the desktop paper loop\n"
+        "/export - write a local operations report\n"
         "/info - automation scope and safety notes\n\n"
         "P2P Paper Sim uses live listings and can send paper-event alerts. "
         "P2P Live Assist can scan, score, alert, and log watch routes. "
@@ -123,12 +135,14 @@ class TelegramDashboardPoller:
         futures_callback: DashboardCallback,
         p2p_callback: DashboardCallback,
         info_callback: DashboardCallback | None = None,
+        control_callback: ControlCallback | None = None,
         poll_interval: float = 2.0,
         session: requests.Session | None = None,
     ):
         self.futures_callback = futures_callback
         self.p2p_callback = p2p_callback
         self.info_callback = info_callback or default_info_text
+        self.control_callback = control_callback
         self.poll_interval = poll_interval
         self.session = session or requests.Session()
         self._stop = threading.Event()
@@ -184,6 +198,14 @@ class TelegramDashboardPoller:
             self._reply(chat_id, self._safe_callback(self.futures_callback), dashboard_keyboard())
         elif text in {"/p2p", "p2p"}:
             self._reply(chat_id, self._safe_callback(self.p2p_callback), dashboard_keyboard())
+        elif text in {"/today", "today"}:
+            self._reply(chat_id, self._safe_control("today"), dashboard_keyboard())
+        elif text in {"/pause", "pause"}:
+            self._reply(chat_id, self._safe_control("pause"), dashboard_keyboard())
+        elif text in {"/resume", "resume"}:
+            self._reply(chat_id, self._safe_control("resume"), dashboard_keyboard())
+        elif text in {"/export", "export"}:
+            self._reply(chat_id, self._safe_control("export"), dashboard_keyboard())
         elif text in {"/info", "info", "/help", "help"}:
             self._reply(chat_id, self._safe_callback(self.info_callback), dashboard_keyboard())
 
@@ -200,6 +222,8 @@ class TelegramDashboardPoller:
             text = self._safe_callback(self.p2p_callback)
         elif data == "dashboard:info":
             text = self._safe_callback(self.info_callback)
+        elif isinstance(data, str) and data.startswith("control:"):
+            text = self._safe_control(data.split(":", 1)[1])
         else:
             text = "Unknown dashboard action."
         try:
@@ -229,6 +253,15 @@ class TelegramDashboardPoller:
         except Exception as exc:
             logger.exception("Telegram dashboard callback failed")
             return f"⚠️ Dashboard data unavailable: {escape_html(exc)}"
+
+    def _safe_control(self, action: str) -> str:
+        if not self.control_callback:
+            return "Telegram controls are not attached to this dashboard instance."
+        try:
+            return self.control_callback(action)
+        except Exception as exc:
+            logger.exception("Telegram control callback failed")
+            return f"⚠️ Control action failed: {escape_html(exc)}"
 
 
 def alert_opened(symbol: str, entry_price: float, tp_price: float,

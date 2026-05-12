@@ -25,6 +25,7 @@ from binance.exceptions import BinanceAPIException
 from bot import config
 from bot.modules import accounting
 from bot.modules import telegram_notifier as tg
+from bot.modules.event_ledger import append_event
 
 logger = logging.getLogger(__name__)
 MAINTENANCE_MARGIN_RATE = 0.005
@@ -359,6 +360,15 @@ class FuturesTrader:
             symbol, quantity, price, margin_usd, notional,
             tp_price, sl_price, position.liquidation_price, entry_fee,
         )
+        self._append_event(
+            event_type="OPEN",
+            status="OPEN",
+            amount=margin_usd,
+            pnl=0.0,
+            balance=self.get_portfolio_value(),
+            symbol_or_route=symbol,
+            details=f"{self.leverage}x notional ${notional:.2f} entry ${price:.4f}",
+        )
         tg.alert_opened(symbol, price, tp_price, position.liquidation_price,
                         margin_usd, self.leverage, entry_change_24h)
         return position
@@ -466,6 +476,15 @@ class FuturesTrader:
                 pos.symbol, exit_price, pos.pnl_pct, pos.pnl_usd, self.cash_balance,
             )
             self._save_trade(pos)
+            self._append_event(
+                event_type="CLOSE",
+                status=reason.value,
+                amount=pos.amount_usd,
+                pnl=pos.pnl_usd,
+                balance=self.cash_balance,
+                symbol_or_route=pos.symbol,
+                details=f"exit ${exit_price:.4f} pnl {pos.pnl_pct:+.2f}%",
+            )
             tg.alert_closed(pos.symbol, pos.entry_price, exit_price,
                             pos.pnl_pct, pos.pnl_usd, reason.value, self.cash_balance)
             return
@@ -479,6 +498,15 @@ class FuturesTrader:
             exit_fee, funding_cost, self.cash_balance,
         )
         self._save_trade(pos)
+        self._append_event(
+            event_type="CLOSE",
+            status=reason.value,
+            amount=pos.amount_usd,
+            pnl=pos.pnl_usd,
+            balance=self.cash_balance,
+            symbol_or_route=pos.symbol,
+            details=f"exit ${exit_price:.4f} pnl {pos.pnl_pct:+.2f}%",
+        )
         tg.alert_closed(pos.symbol, pos.entry_price, exit_price,
                         pos.pnl_pct, pos.pnl_usd, reason.value, self.cash_balance)
 
@@ -555,6 +583,15 @@ class FuturesTrader:
         if amount:
             self.refresh_cross_liquidation_prices()
             self._save_open_positions()
+            self._append_event(
+                event_type="CONTRIBUTION",
+                status="APPLIED",
+                amount=amount,
+                pnl=0.0,
+                balance=self.cash_balance,
+                symbol_or_route="USD",
+                details="monthly paper contribution",
+            )
         return amount
 
     def get_contributed_capital(self) -> float:
@@ -742,6 +779,32 @@ class FuturesTrader:
         """Avoid tiny floating-point cash dust showing as negative zero."""
         if abs(self.cash_balance) < 0.01:
             self.cash_balance = 0.0
+
+    @staticmethod
+    def _append_event(
+        *,
+        event_type: str,
+        status: str,
+        amount: float,
+        pnl: float,
+        balance: float,
+        symbol_or_route: str,
+        details: str,
+    ) -> None:
+        try:
+            append_event(
+                domain="futures",
+                event_type=event_type,
+                status=status,
+                amount=amount,
+                currency="USD",
+                pnl=pnl,
+                balance=balance,
+                symbol_or_route=symbol_or_route,
+                details=details,
+            )
+        except Exception:
+            logger.debug("Failed to append futures event ledger row", exc_info=True)
 
     def get_open_positions(self) -> list[FuturesPosition]:
         return [p for p in self.positions if p.status == FuturesPositionStatus.OPEN]

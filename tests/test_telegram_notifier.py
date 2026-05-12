@@ -74,6 +74,21 @@ class TestTelegramDashboardPoller(unittest.TestCase):
         self.assertIn("answerCallbackQuery", session.posts[0]["url"])
         self.assertEqual(session.posts[1]["json"]["text"], "P2P")
 
+    def test_control_command_uses_control_callback(self):
+        session = FakeSession()
+        poller = TelegramDashboardPoller(
+            futures_callback=lambda: "FUTURES",
+            p2p_callback=lambda: "P2P",
+            info_callback=lambda: "INFO",
+            control_callback=lambda action: f"CONTROL:{action}",
+            session=session,
+        )
+
+        poller._handle_update({"message": {"text": "/today", "chat": {"id": 123}}})
+
+        self.assertEqual(len(session.posts), 1)
+        self.assertEqual(session.posts[0]["json"]["text"], "CONTROL:today")
+
     def test_ignores_unconfigured_chat(self):
         session = FakeSession()
         poller = TelegramDashboardPoller(

@@ -8,7 +8,9 @@ from pathlib import Path
 from bot.modules.p2p_arbitrage import (
     P2PJournal,
     P2PPaperArb,
+    P2PRealismSettings,
     P2PRouteSettings,
+    apply_realism_to_sweep,
     build_depth_sweep,
     build_p2p_routes,
     build_p2p_hold_entry,
@@ -147,6 +149,32 @@ class TestP2PArbitrage(unittest.TestCase):
         self.assertAlmostEqual(sweep.size_php, 200_000)
         self.assertGreater(sweep.avg_sell_price, sweep.avg_buy_price)
         self.assertGreater(sweep.profit_php, 0)
+
+    def test_realism_buffer_reduces_depth_sweep_profit(self):
+        snapshot = P2PSnapshot(
+            marketplace="Binance",
+            asset="USDT",
+            fiat="PHP",
+            buy_ads=[p2p_ad("BUY", "Binance", 60.00, 1_000, 100_000, 5_000, "seller")],
+            sell_ads=[p2p_ad("SELL", "Binance", 60.30, 1_000, 100_000, 5_000, "buyer")],
+            as_of=None,
+        )
+        sweep = build_depth_sweep(
+            [snapshot],
+            P2PRouteSettings(capital_php=50_000, min_profit_pct=0.1),
+        )
+
+        adjusted = apply_realism_to_sweep(
+            sweep,
+            P2PRealismSettings(
+                settlement_delay_mins=30,
+                cancel_rate_pct=3,
+                spread_decay_pct=0.05,
+            ),
+        )
+
+        self.assertLess(adjusted.profit_php, sweep.profit_php)
+        self.assertIn("realism drag", "; ".join(adjusted.warnings))
 
     def test_paper_arb_executes_profitable_sweep_and_persists_balance(self):
         snapshot = P2PSnapshot(

@@ -20,13 +20,16 @@ import csv as _csv
 from bot import config
 from bot.modules import accounting
 from bot.modules import telegram_notifier as tg
+from bot.modules.event_ledger import EventLedger, append_event
 from bot.modules.futures_trader import _history_csv
 from bot.modules.p2p_arbitrage import (
     P2PDepthSweep,
     P2PJournal,
     P2PPaperArb,
+    P2PRealismSettings,
     P2PRoute,
     P2PRouteSettings,
+    apply_realism_to_sweep,
     build_depth_sweep,
     build_p2p_routes,
     build_p2p_hold_entry,
@@ -56,6 +59,7 @@ class Dashboard:
         self.p2p_monitor = P2PMonitor(asset="USDT", fiat="PHP")
         self.p2p_journal = P2PJournal()
         self.p2p_paper = P2PPaperArb()
+        self.event_ledger = EventLedger()
         self._p2p_refreshing = False
         self._p2p_last_snapshot: P2PSnapshot | None = None
         self._p2p_routes: list[P2PRoute] = []
@@ -67,6 +71,8 @@ class Dashboard:
         self._p2p_last_logged_route_key = ""
         self._p2p_last_auto_cycle_key = ""
         self._telegram_commands = None
+        self._risk_kill_switch = False
+        self._decision_log: list[dict[str, str]] = []
 
         # Equity history: list of (datetime, portfolio_value)
         self._equity_history: list[tuple[datetime, float]] = []
@@ -74,8 +80,8 @@ class Dashboard:
 
         self.root = tk.Tk()
         self.root.title("TradingBot23")
-        self.root.geometry("1080x780")
-        self.root.minsize(980, 680)
+        self.root.geometry("1280x840")
+        self.root.minsize(1100, 720)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_ui()
@@ -214,25 +220,31 @@ class Dashboard:
         nb.pack(fill="both", expand=True, padx=0, pady=0)
 
         open_tab     = tk.Frame(nb, bg="#0d1117")
+        risk_tab     = tk.Frame(nb, bg="#0d1117")
         charts_tab   = tk.Frame(nb, bg="#0d1117")
         history_tab  = tk.Frame(nb, bg="#0d1117")
         p2p_tab      = tk.Frame(nb, bg="#0d1117")
         p2p_history_tab = tk.Frame(nb, bg="#0d1117")
+        ledger_tab   = tk.Frame(nb, bg="#0d1117")
         settings_tab = tk.Frame(nb, bg="#0d1117")
         self.settings_tab = settings_tab
         nb.add(open_tab,     text="  Open  ")
+        nb.add(risk_tab,     text="  Risk  ")
         nb.add(charts_tab,   text="  Charts  ")
         nb.add(history_tab,  text="  History  ")
         nb.add(p2p_tab,      text="  P2P Arb  ")
         nb.add(p2p_history_tab, text="  P2P History  ")
+        nb.add(ledger_tab,   text="  Ledger  ")
         nb.add(settings_tab, text="  Settings  ")
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         self._build_open_tab(open_tab)
+        self._build_risk_tab(risk_tab)
         self._build_charts_tab(charts_tab)
         self._build_history_tab(history_tab)
         self._build_p2p_tab(p2p_tab)
         self._build_p2p_history_tab(p2p_history_tab)
+        self._build_ledger_tab(ledger_tab)
         self._build_settings_tab(settings_tab)
         if not self._settings_confirmed:
             nb.select(settings_tab)
@@ -253,6 +265,7 @@ class Dashboard:
             futures_callback=self._telegram_futures_snapshot,
             p2p_callback=self._telegram_p2p_snapshot,
             info_callback=self._telegram_info_text,
+            control_callback=self._telegram_control,
         )
         self._telegram_commands.start()
 
@@ -314,8 +327,10 @@ class Dashboard:
             snapshot = self._p2p_last_snapshot
             stale_note = f"\nUsing last UI snapshot; live refresh failed: {tg.escape_html(exc)}"
 
-        routes = build_p2p_routes([snapshot], settings=settings)
-        sweep = build_depth_sweep([snapshot], settings=settings)
+        scan_settings = self._p2p_capped_route_settings(settings)
+        routes = build_p2p_routes([snapshot], settings=scan_settings)
+        raw_sweep = build_depth_sweep([snapshot], settings=scan_settings)
+        sweep = self._apply_p2p_realism(raw_sweep) if raw_sweep else None
         state = self.p2p_paper.state(settings.capital_php)
         return self._format_p2p_dashboard_text(snapshot, routes, sweep, state, settings) + stale_note
 
@@ -326,8 +341,56 @@ class Dashboard:
             "P2P Paper Sim: uses live Binance listings, updates paper ledger, and can send Telegram paper-event alerts.\n"
             "P2P Live Assist: scan, spread score, Telegram alert, and watchlist log only.\n\n"
             "Manual in real P2P: choose counterparty, send fiat, confirm payment, verify receipt, release crypto, and handle disputes.\n"
-            "Commands: /dashboard, /p2p, /info"
+            "Commands: /dashboard, /p2p, /today, /pause, /resume, /export, /info"
         )
+
+    def _telegram_control(self, action: str) -> str:
+        action = (action or "").lower()
+        if action == "today":
+            return self._telegram_today_text()
+        if action == "pause":
+            self._paused = True
+            self._record_decision("telegram", "pause", "BLOCK", 0, "pause requested from Telegram")
+            try:
+                self.root.after(0, lambda: self.pause_btn.config(text="Resume"))
+            except tk.TclError:
+                pass
+            return "⏸️ <b>TradingBot23 paused.</b>\nExisting paper positions remain in the local ledger."
+        if action == "resume":
+            self._risk_kill_switch = False
+            allowed, reasons = self._risk_allows_trading()
+            if not allowed:
+                self._paused = True
+                self._record_decision("telegram", "resume", "BLOCK", 0, "; ".join(reasons))
+                return "⛔ <b>Resume blocked by risk guard.</b>\n" + tg.escape_html("; ".join(reasons))
+            self._paused = False
+            self._force_event.set()
+            self._record_decision("telegram", "resume", "RUN", 100, "resume requested from Telegram")
+            try:
+                self.root.after(0, lambda: self.pause_btn.config(text="Pause"))
+            except tk.TclError:
+                pass
+            return "▶️ <b>TradingBot23 resumed.</b>\nA futures paper cycle was requested."
+        if action == "export":
+            out = self._write_ops_report()
+            self._record_decision("telegram", "export", "UPDATED", 80, out.name)
+            return f"📄 <b>Operations report exported.</b>\n{tg.escape_html(str(out))}"
+        return "Unknown control action."
+
+    def _telegram_today_text(self) -> str:
+        snap = self._risk_snapshot()
+        p2p_state = self.p2p_paper.state(self._p2p_starting_capital_php())
+        allowed, reasons = self._risk_allows_trading()
+        return "\n".join([
+            "📅 <b>TradingBot23 Today</b>",
+            f"Risk: <b>{'OK' if allowed else 'BLOCKED'}</b>",
+            f"Futures daily closed P&L: <b>${snap['daily_pnl']:+,.2f}</b>",
+            f"Portfolio: <b>${snap['portfolio']:,.2f}</b> | Cash: <b>${snap['cash']:,.2f}</b>",
+            f"Open futures notional: <b>${snap['open_notional']:,.2f}</b>",
+            f"P2P paper: <b>{self._num(p2p_state.get('balance_php')):,.0f} PHP</b> "
+            f"({self._num(p2p_state.get('realized_profit_php')):+,.0f} realized)",
+            f"Risk note: {tg.escape_html('; '.join(reasons) if reasons else 'limits clear')}",
+        ])
 
     def _format_p2p_dashboard_text(
         self,
@@ -431,6 +494,129 @@ class Dashboard:
             self.closed_tree.heading(col, text=heading)
             self.closed_tree.column(col, width=width, anchor="center")
         self.closed_tree.pack(fill="both", expand=True)
+
+    # ── Professional risk cockpit ─────────────────────────────────────────────
+
+    def _build_risk_tab(self, parent):
+        body = tk.Frame(parent, bg="#0d1117", padx=15, pady=12)
+        body.pack(fill="both", expand=True)
+
+        top = tk.Frame(body, bg="#0d1117")
+        top.pack(fill="x", pady=(0, 8))
+        ttk.Label(top, text="PROFESSIONAL CONTROL CENTER", style="Header.TLabel",
+                  background="#0d1117").pack(side="left")
+        ttk.Button(top, text="Refresh", style="Btn.TButton",
+                   command=self._refresh_risk_tab).pack(side="right")
+        ttk.Button(top, text="Export Ops Report", style="Btn.TButton",
+                   command=self._export_ops_report).pack(side="right", padx=(0, 6))
+
+        self._risk_summary_var = tk.StringVar(value="")
+        ttk.Label(body, textvariable=self._risk_summary_var,
+                  foreground="#8b949e", background="#0d1117",
+                  font=("Consolas", 9)).pack(fill="x", anchor="w", pady=(0, 8))
+
+        controls = tk.Frame(body, bg="#0d1117")
+        controls.pack(fill="x", pady=(0, 10))
+
+        self._risk_profile = tk.StringVar(value=config.BOT_PROFILE)
+        self._risk_max_daily_loss = tk.StringVar(value=str(config.RISK_MAX_DAILY_LOSS_USD))
+        self._risk_max_exposure = tk.StringVar(value=str(config.RISK_MAX_OPEN_EXPOSURE_USD))
+        self._risk_max_loss_streak = tk.StringVar(value=str(config.RISK_MAX_LOSS_STREAK))
+        self._risk_p2p_max_route = tk.StringVar(value=str(config.P2P_MAX_ROUTE_PHP))
+        self._p2p_delay_mins = tk.StringVar(value=str(config.P2P_SETTLEMENT_DELAY_MINS))
+        self._p2p_cancel_rate = tk.StringVar(value=str(config.P2P_CANCEL_RATE_PCT))
+        self._p2p_spread_decay = tk.StringVar(value=str(config.P2P_SPREAD_DECAY_PCT))
+
+        def entry(parent_frame, var, width):
+            return tk.Entry(
+                parent_frame,
+                textvariable=var,
+                width=width,
+                font=("Consolas", 9),
+                bg="#f0f6fc",
+                fg="#0d1117",
+                insertbackground="#0d1117",
+                selectbackground="#58a6ff",
+                selectforeground="#0d1117",
+                relief="solid",
+                bd=1,
+                highlightthickness=1,
+                highlightbackground="#8b949e",
+                highlightcolor="#58a6ff",
+            )
+
+        for label_text, var, width in [
+            ("Profile", self._risk_profile, 12),
+            ("Max daily loss $", self._risk_max_daily_loss, 8),
+            ("Max open notional $", self._risk_max_exposure, 9),
+            ("Max loss streak", self._risk_max_loss_streak, 5),
+            ("P2P max route PHP", self._risk_p2p_max_route, 9),
+            ("P2P delay min", self._p2p_delay_mins, 6),
+            ("P2P cancel %", self._p2p_cancel_rate, 6),
+            ("P2P decay %", self._p2p_spread_decay, 6),
+        ]:
+            group = tk.Frame(controls, bg="#0d1117")
+            group.pack(side="left", padx=(0, 10))
+            ttk.Label(group, text=label_text, foreground="#8b949e", background="#0d1117",
+                      font=("Consolas", 8)).pack(anchor="w")
+            entry(group, var, width).pack(anchor="w")
+
+        btns = tk.Frame(body, bg="#0d1117")
+        btns.pack(fill="x", pady=(0, 10))
+        ttk.Button(btns, text="Apply Risk", style="Btn.TButton",
+                   command=self._apply_risk_settings).pack(side="left", padx=(0, 6))
+        ttk.Button(btns, text="Kill Switch", style="Btn.TButton",
+                   command=self._risk_kill).pack(side="left", padx=(0, 6))
+        ttk.Button(btns, text="Resume If Allowed", style="Btn.TButton",
+                   command=self._risk_resume).pack(side="left", padx=(0, 6))
+        self._risk_action_var = tk.StringVar(value="")
+        ttk.Label(btns, textvariable=self._risk_action_var,
+                  foreground="#3fb950", background="#0d1117",
+                  font=("Consolas", 9)).pack(side="left", padx=10)
+
+        panes = tk.PanedWindow(body, orient=tk.VERTICAL, sashwidth=4, bg="#0d1117")
+        panes.pack(fill="both", expand=True)
+
+        risk_frame = tk.Frame(panes, bg="#0d1117")
+        panes.add(risk_frame, minsize=220)
+        ttk.Label(risk_frame, text="RISK, PROFILE, AND FORWARD TEST", style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(0, 3))
+        cols = ("metric", "value", "limit", "status")
+        self.risk_tree = ttk.Treeview(risk_frame, columns=cols, show="headings", height=9)
+        for col, heading, width in [
+            ("metric", "METRIC", 210),
+            ("value", "VALUE", 220),
+            ("limit", "LIMIT", 180),
+            ("status", "STATUS", 180),
+        ]:
+            self.risk_tree.heading(col, text=heading)
+            self.risk_tree.column(col, width=width, anchor="center")
+        self.risk_tree.tag_configure("ok", foreground="#3fb950")
+        self.risk_tree.tag_configure("warn", foreground="#e3b341")
+        self.risk_tree.tag_configure("block", foreground="#f85149")
+        self.risk_tree.pack(fill="both", expand=True)
+
+        decision_frame = tk.Frame(panes, bg="#0d1117")
+        panes.add(decision_frame, minsize=220)
+        ttk.Label(decision_frame, text="STRATEGY CONFIDENCE / DECISION LOG", style="Header.TLabel",
+                  background="#0d1117").pack(anchor="w", pady=(8, 3))
+        dcols = ("time", "domain", "action", "decision", "score", "reason")
+        self.decision_tree = ttk.Treeview(decision_frame, columns=dcols, show="headings", height=8)
+        for col, heading, width in [
+            ("time", "TIME", 125),
+            ("domain", "DOMAIN", 85),
+            ("action", "ACTION", 125),
+            ("decision", "DECISION", 95),
+            ("score", "SCORE", 65),
+            ("reason", "REASON", 520),
+        ]:
+            self.decision_tree.heading(col, text=heading)
+            self.decision_tree.column(col, width=width, anchor="center")
+        self.decision_tree.tag_configure("go", foreground="#3fb950")
+        self.decision_tree.tag_configure("wait", foreground="#e3b341")
+        self.decision_tree.tag_configure("block", foreground="#f85149")
+        self.decision_tree.pack(fill="both", expand=True)
+        self._refresh_risk_tab()
 
     def _build_charts_tab(self, parent):
         ctrl = tk.Frame(parent, bg="#0d1117", pady=8)
@@ -719,6 +905,48 @@ class Dashboard:
         out.write_text(report, encoding="utf-8")
         self._hist_summary_var.set(f"Report exported: {out.name}")
 
+    # ── Event ledger tab ─────────────────────────────────────────────────────
+
+    def _build_ledger_tab(self, parent):
+        body = tk.Frame(parent, bg="#0d1117", padx=15, pady=12)
+        body.pack(fill="both", expand=True)
+
+        top = tk.Frame(body, bg="#0d1117")
+        top.pack(fill="x", pady=(0, 8))
+        ttk.Label(top, text="UNIFIED EVENT LEDGER", style="Header.TLabel",
+                  background="#0d1117").pack(side="left")
+        ttk.Button(top, text="Refresh", style="Btn.TButton",
+                   command=self._refresh_event_ledger).pack(side="right")
+
+        self._ledger_summary_var = tk.StringVar(value="")
+        ttk.Label(body, textvariable=self._ledger_summary_var,
+                  foreground="#8b949e", background="#0d1117",
+                  font=("Consolas", 9)).pack(fill="x", anchor="w", pady=(0, 8))
+
+        cols = ("time", "domain", "type", "status", "amount", "pnl", "balance", "symbol", "details")
+        self.ledger_tree = ttk.Treeview(body, columns=cols, show="headings", height=22)
+        for col, heading, width in [
+            ("time", "TIME", 135),
+            ("domain", "DOMAIN", 80),
+            ("type", "TYPE", 120),
+            ("status", "STATUS", 100),
+            ("amount", "AMOUNT", 110),
+            ("pnl", "P&L", 95),
+            ("balance", "BALANCE", 115),
+            ("symbol", "SYMBOL/ROUTE", 115),
+            ("details", "DETAILS", 420),
+        ]:
+            self.ledger_tree.heading(col, text=heading)
+            self.ledger_tree.column(col, width=width, anchor="center")
+        self.ledger_tree.tag_configure("profit", foreground="#3fb950")
+        self.ledger_tree.tag_configure("loss", foreground="#f85149")
+        self.ledger_tree.tag_configure("system", foreground="#e3b341")
+        vsb = ttk.Scrollbar(body, orient="vertical", command=self.ledger_tree.yview)
+        self.ledger_tree.configure(yscrollcommand=vsb.set)
+        self.ledger_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self._refresh_event_ledger()
+
     # ── P2P arbitrage tab ────────────────────────────────────────────────────
 
     def _build_p2p_tab(self, parent):
@@ -742,6 +970,12 @@ class Dashboard:
         self._p2p_min_profit_pct = tk.StringVar(value="0.10")
         self._p2p_transfer_fee_usdt = tk.StringVar(value="1.0")
         self._p2p_buffer_php = tk.StringVar(value="0")
+        if not hasattr(self, "_p2p_delay_mins"):
+            self._p2p_delay_mins = tk.StringVar(value=str(config.P2P_SETTLEMENT_DELAY_MINS))
+        if not hasattr(self, "_p2p_cancel_rate"):
+            self._p2p_cancel_rate = tk.StringVar(value=str(config.P2P_CANCEL_RATE_PCT))
+        if not hasattr(self, "_p2p_spread_decay"):
+            self._p2p_spread_decay = tk.StringVar(value=str(config.P2P_SPREAD_DECAY_PCT))
         self._p2p_auto_alert = tk.BooleanVar(value=True)
         self._p2p_auto_log = tk.BooleanVar(value=False)
         self._p2p_auto_paper = tk.BooleanVar(value=False)
@@ -753,6 +987,9 @@ class Dashboard:
             ("Min net %", self._p2p_min_profit_pct, 6),
             ("Xfer fee USDT", self._p2p_transfer_fee_usdt, 6),
             ("Buffer PHP", self._p2p_buffer_php, 7),
+            ("Delay min", self._p2p_delay_mins, 6),
+            ("Cancel %", self._p2p_cancel_rate, 6),
+            ("Decay %", self._p2p_spread_decay, 6),
         ]:
             group = tk.Frame(controls, bg="#0d1117")
             group.pack(side="left", padx=(0, 12))
@@ -920,54 +1157,14 @@ class Dashboard:
         self.p2p_buy_tree = self._build_p2p_table(
             buy_parent,
             "BUY USDT WITH PHP (LOWEST SELLER PRICES)",
-            height=8,
+            height=12,
         )
         self.p2p_sell_tree = self._build_p2p_table(
             sell_parent,
             "SELL USDT FOR PHP (HIGHEST BUYER PRICES)",
-            height=8,
+            height=12,
         )
-
-        journal = tk.Frame(body, bg="#0d1117")
-        journal.pack(fill="x", expand=False, pady=(0, 4))
-        ttk.Label(journal, text="RECENT P2P CYCLE JOURNAL", style="Header.TLabel",
-                  background="#0d1117").pack(anchor="w", pady=(0, 3))
-        journal_cols = ("time", "status", "route", "size", "profit", "notes")
-        self.p2p_journal_tree = ttk.Treeview(journal, columns=journal_cols, show="headings", height=3)
-        for col, heading, width in [
-            ("time", "TIME", 120),
-            ("status", "STATUS", 85),
-            ("route", "ROUTE", 120),
-            ("size", "SIZE PHP", 90),
-            ("profit", "EXP PHP", 90),
-            ("notes", "NOTES", 320),
-        ]:
-            self.p2p_journal_tree.heading(col, text=heading)
-            self.p2p_journal_tree.column(col, width=width, anchor="center")
-        self.p2p_journal_tree.pack(fill="both", expand=True)
         self._refresh_p2p_journal()
-
-        tx = tk.Frame(body, bg="#0d1117")
-        tx.pack(fill="both", expand=True, pady=(0, 4))
-        ttk.Label(tx, text="P2P PAPER TRANSACTION HISTORY", style="Header.TLabel",
-                  background="#0d1117").pack(anchor="w", pady=(0, 3))
-        tx_cols = ("time", "type", "status", "php", "usdt", "profit", "balance", "notes")
-        self.p2p_tx_tree = ttk.Treeview(tx, columns=tx_cols, show="headings", height=5)
-        for col, heading, width in [
-            ("time", "TIME", 120),
-            ("type", "TYPE", 95),
-            ("status", "STATUS", 75),
-            ("php", "PHP", 90),
-            ("usdt", "USDT", 90),
-            ("profit", "P&L PHP", 90),
-            ("balance", "BALANCE", 95),
-            ("notes", "NOTES", 300),
-        ]:
-            self.p2p_tx_tree.heading(col, text=heading)
-            self.p2p_tx_tree.column(col, width=width, anchor="center")
-        self.p2p_tx_tree.tag_configure("profit", foreground="#3fb950")
-        self.p2p_tx_tree.tag_configure("loss", foreground="#f85149")
-        self.p2p_tx_tree.pack(fill="both", expand=True)
         self._refresh_p2p_transactions()
 
     def _build_p2p_history_tab(self, parent):
@@ -1172,11 +1369,25 @@ class Dashboard:
                 )
             return
 
-        self._p2p_routes = build_p2p_routes([self._p2p_last_snapshot], settings=settings)
-        self._p2p_sweep = build_depth_sweep([self._p2p_last_snapshot], settings=settings)
+        scan_settings = self._p2p_capped_route_settings(settings)
+        self._p2p_routes = build_p2p_routes([self._p2p_last_snapshot], settings=scan_settings)
+        raw_sweep = build_depth_sweep([self._p2p_last_snapshot], settings=scan_settings)
+        self._p2p_sweep = self._apply_p2p_realism(raw_sweep) if raw_sweep else None
         self._fill_p2p_route_tree(self._p2p_routes)
         self._update_p2p_sweep_summary()
         self._refresh_p2p_paper_summary()
+
+        decision_reason = "no route meets current filters"
+        decision = "SKIP"
+        score = 0.0
+        if self._p2p_sweep:
+            decision_reason = (
+                f"sweep {self._p2p_sweep.profit_php:+,.0f} PHP "
+                f"({self._p2p_sweep.profit_pct:+.3f}%) grade {self._p2p_sweep.grade}"
+            )
+            decision = "RUN" if self._p2p_sweep.profit_pct >= settings.min_profit_pct and self._p2p_sweep.profit_php > 0 else "SKIP"
+            score = max(0.0, min(100.0, self._p2p_sweep.profit_pct / max(settings.min_profit_pct, 0.001) * 60))
+        self._record_decision("p2p", "recalculate", decision, score, decision_reason)
 
         if self._p2p_routes:
             top = self._p2p_routes[0]
@@ -1238,6 +1449,46 @@ class Dashboard:
         )
         self._p2p_settings_cache = settings
         return settings
+
+    def _p2p_starting_capital_php(self) -> float:
+        if hasattr(self, "_p2p_capital_php"):
+            return self._num(self._p2p_capital_php.get(), 500_000)
+        return 500_000.0
+
+    @staticmethod
+    def _p2p_capped_route_settings(settings: P2PRouteSettings) -> P2PRouteSettings:
+        route_cap = config.P2P_MAX_ROUTE_PHP
+        capital_php = settings.capital_php
+        if route_cap > 0:
+            capital_php = min(capital_php, route_cap)
+        return P2PRouteSettings(
+            capital_php=capital_php,
+            min_profit_php=settings.min_profit_php,
+            min_profit_pct=settings.min_profit_pct,
+            min_completion_rate=settings.min_completion_rate,
+            min_orders=settings.min_orders,
+            cross_exchange_transfer_fee_usdt=settings.cross_exchange_transfer_fee_usdt,
+            local_buffer_php=settings.local_buffer_php,
+            allowed_methods=settings.allowed_methods,
+        )
+
+    def _p2p_realism_settings(self) -> P2PRealismSettings:
+        try:
+            delay = float(self._p2p_delay_mins.get()) if hasattr(self, "_p2p_delay_mins") else config.P2P_SETTLEMENT_DELAY_MINS
+            cancel = float(self._p2p_cancel_rate.get()) if hasattr(self, "_p2p_cancel_rate") else config.P2P_CANCEL_RATE_PCT
+            decay = float(self._p2p_spread_decay.get()) if hasattr(self, "_p2p_spread_decay") else config.P2P_SPREAD_DECAY_PCT
+        except Exception:
+            delay = config.P2P_SETTLEMENT_DELAY_MINS
+            cancel = config.P2P_CANCEL_RATE_PCT
+            decay = config.P2P_SPREAD_DECAY_PCT
+        return P2PRealismSettings(
+            settlement_delay_mins=max(0.0, delay),
+            cancel_rate_pct=max(0.0, cancel),
+            spread_decay_pct=max(0.0, decay),
+        )
+
+    def _apply_p2p_realism(self, sweep: P2PDepthSweep) -> P2PDepthSweep:
+        return apply_realism_to_sweep(sweep, realism=self._p2p_realism_settings())
 
     def _fill_p2p_route_tree(self, routes: list[P2PRoute]):
         for item in self.p2p_route_tree.get_children():
@@ -1415,6 +1666,7 @@ class Dashboard:
             local_buffer_php=settings.local_buffer_php,
             allowed_methods=settings.allowed_methods,
         )
+        hold_settings = self._p2p_capped_route_settings(hold_settings)
         entry = build_p2p_hold_entry([self._p2p_last_snapshot], settings=hold_settings)
         if not entry:
             self._p2p_status_var.set("Hold buy skipped: not enough buy-side depth.")
@@ -1518,9 +1770,12 @@ class Dashboard:
             local_buffer_php=settings.local_buffer_php,
             allowed_methods=settings.allowed_methods,
         )
-        paper_sweep = build_depth_sweep([self._p2p_last_snapshot], settings=paper_settings)
+        paper_settings = self._p2p_capped_route_settings(paper_settings)
+        raw_paper_sweep = build_depth_sweep([self._p2p_last_snapshot], settings=paper_settings)
+        paper_sweep = self._apply_p2p_realism(raw_paper_sweep) if raw_paper_sweep else None
         if not paper_sweep:
             self._p2p_status_var.set("Paper cycle skipped: not enough depth.")
+            self._record_decision("p2p", "paper_cycle", "SKIP", 0, "not enough depth")
             return
         if auto:
             auto_key = self._p2p_sweep_listing_key(paper_sweep)
@@ -1540,6 +1795,14 @@ class Dashboard:
             )
             if auto:
                 self._p2p_last_auto_cycle_key = auto_key
+            self._record_decision(
+                "p2p",
+                "paper_cycle",
+                "FILLED",
+                100,
+                f"{cycle.profit_php:+,.0f} PHP ({cycle.profit_pct:+.3f}%) realized paper",
+            )
+            self._append_p2p_lifecycle_events(cycle, paper_sweep, "AUTO" if auto else "MANUAL")
             warnings = "; ".join(cycle.warnings) if cycle.warnings else "ok"
             self._send_p2p_paper_event(
                 "Paper Buy+Sell Filled",
@@ -1552,7 +1815,41 @@ class Dashboard:
                 ],
             )
         elif not auto:
+            self._record_decision(
+                "p2p",
+                "paper_cycle",
+                "SKIP",
+                0,
+                f"below profit filter after realism: {paper_sweep.profit_php:+,.0f} PHP",
+            )
             self._p2p_status_var.set("Paper cycle skipped: sweep is below profit filter.")
+
+    def _append_p2p_lifecycle_events(self, cycle, sweep: P2PDepthSweep, source: str):
+        steps = [
+            ("ROUTE_SELECTED", "PLANNED", f"{source} paper route selected"),
+            ("BUY_ORDER", "OPENED", f"{len(sweep.buy_lots)} buy lot(s)"),
+            ("FIAT_PAYMENT", "CONFIRMED", "paper fiat payment confirmed"),
+            ("SELL_ORDER", "OPENED", f"{len(sweep.sell_lots)} sell lot(s)"),
+            ("CRYPTO_RELEASE", "CONFIRMED", "paper crypto release confirmed"),
+            ("PAPER_CYCLE", "COMPLETED", "; ".join(cycle.warnings) if cycle.warnings else "ok"),
+        ]
+        for event_type, status, details in steps:
+            try:
+                self.event_ledger.append(
+                    domain="p2p_lifecycle",
+                    event_type=event_type,
+                    status=status,
+                    amount=cycle.size_php,
+                    currency="PHP",
+                    pnl=cycle.profit_php if status == "COMPLETED" else 0.0,
+                    balance=cycle.balance_after_php if status == "COMPLETED" else 0.0,
+                    symbol_or_route="USDT/PHP",
+                    details=details,
+                    timestamp=cycle.timestamp,
+                )
+            except Exception:
+                pass
+        self._refresh_event_ledger()
 
     @staticmethod
     def _p2p_sweep_listing_key(sweep: P2PDepthSweep) -> str:
@@ -1705,7 +2002,7 @@ class Dashboard:
             f"Paper balance {self._num(state.get('balance_php')):,.0f} PHP  |  "
             f"Cash {self._num(state.get('cash_php')):,.0f} PHP  |  "
             f"Realized {self._num(state.get('realized_profit_php')):+,.0f} PHP  |  "
-            f"{tx_count} transaction(s)  |  CSV: data/p2p_transaction_history.csv"
+            f"{tx_count} transaction(s)  |  CSV: {self.p2p_paper.transaction_path}"
         )
 
     def _fill_p2p_tree(self, tree, ads):
@@ -2003,10 +2300,335 @@ class Dashboard:
                 new_lines.append(f"{key}={val}")
         env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
+    def _risk_snapshot(self) -> dict:
+        open_positions = list(self.trader.get_open_positions())
+        closed = list(self.trader.get_trade_history())
+        portfolio = self.trader.get_portfolio_value()
+        cash = self.trader.cash_balance
+        open_notional = sum(self._num(getattr(pos, "notional", 0.0)) for pos in open_positions)
+        open_margin = sum(self._num(getattr(pos, "margin_used", 0.0)) for pos in open_positions)
+        today_key = datetime.now(timezone.utc).date()
+        daily_pnl = 0.0
+        for pos in closed:
+            exit_time = getattr(pos, "exit_time", None)
+            if exit_time and exit_time.astimezone(timezone.utc).date() == today_key:
+                daily_pnl += self._num(getattr(pos, "pnl_usd", 0.0))
+
+        sorted_closed = sorted(
+            [p for p in closed if getattr(p, "exit_time", None)],
+            key=lambda p: p.exit_time,
+            reverse=True,
+        )
+        loss_streak = 0
+        for pos in sorted_closed:
+            if self._num(getattr(pos, "pnl_usd", 0.0)) < 0:
+                loss_streak += 1
+            else:
+                break
+
+        try:
+            p2p_state = self.p2p_paper.state(self._p2p_starting_capital_php())
+        except Exception:
+            p2p_state = {}
+        backtests = sorted(config.DATA_DIR.glob("backtest*.txt")) if config.DATA_DIR.exists() else []
+        return {
+            "portfolio": portfolio,
+            "cash": cash,
+            "open_count": len(open_positions),
+            "open_notional": open_notional,
+            "open_margin": open_margin,
+            "daily_pnl": daily_pnl,
+            "loss_streak": loss_streak,
+            "total_trades": len(closed),
+            "p2p_balance": self._num(p2p_state.get("balance_php")),
+            "p2p_realized": self._num(p2p_state.get("realized_profit_php")),
+            "profile": config.BOT_PROFILE,
+            "data_dir": str(config.DATA_DIR),
+            "backtest_count": len(backtests),
+            "latest_backtest": backtests[-1].name if backtests else "none",
+        }
+
+    def _risk_allows_trading(self) -> tuple[bool, list[str]]:
+        snap = self._risk_snapshot()
+        reasons: list[str] = []
+        if self._risk_kill_switch:
+            reasons.append("kill switch active")
+        if config.RISK_MAX_DAILY_LOSS_USD > 0 and snap["daily_pnl"] <= -config.RISK_MAX_DAILY_LOSS_USD:
+            reasons.append(f"daily loss {snap['daily_pnl']:+.2f} <= -{config.RISK_MAX_DAILY_LOSS_USD:.2f}")
+        if config.RISK_MAX_OPEN_EXPOSURE_USD > 0 and snap["open_notional"] >= config.RISK_MAX_OPEN_EXPOSURE_USD:
+            reasons.append(
+                f"open notional {snap['open_notional']:.2f} >= {config.RISK_MAX_OPEN_EXPOSURE_USD:.2f}"
+            )
+        if config.RISK_MAX_LOSS_STREAK > 0 and snap["loss_streak"] >= config.RISK_MAX_LOSS_STREAK:
+            reasons.append(f"loss streak {snap['loss_streak']} >= {config.RISK_MAX_LOSS_STREAK}")
+        return not reasons, reasons
+
+    def _apply_risk_settings(self):
+        try:
+            profile = self._risk_profile.get().strip() or "default"
+            daily_loss = max(0.0, float(self._risk_max_daily_loss.get()))
+            exposure = max(0.0, float(self._risk_max_exposure.get()))
+            loss_streak = max(0, int(self._risk_max_loss_streak.get()))
+            p2p_max_route = max(0.0, float(self._risk_p2p_max_route.get()))
+            p2p_delay = max(0.0, float(self._p2p_delay_mins.get()))
+            p2p_cancel = max(0.0, float(self._p2p_cancel_rate.get()))
+            p2p_decay = max(0.0, float(self._p2p_spread_decay.get()))
+        except ValueError as exc:
+            self._risk_action_var.set(f"Error: {exc}")
+            return
+
+        self._write_env({
+            "BOT_PROFILE": profile,
+            "RISK_MAX_DAILY_LOSS_USD": daily_loss,
+            "RISK_MAX_OPEN_EXPOSURE_USD": exposure,
+            "RISK_MAX_LOSS_STREAK": loss_streak,
+            "P2P_MAX_ROUTE_PHP": p2p_max_route,
+            "P2P_SETTLEMENT_DELAY_MINS": p2p_delay,
+            "P2P_CANCEL_RATE_PCT": p2p_cancel,
+            "P2P_SPREAD_DECAY_PCT": p2p_decay,
+        })
+        old_profile = config.BOT_PROFILE
+        config.BOT_PROFILE = profile
+        config.RISK_MAX_DAILY_LOSS_USD = daily_loss
+        config.RISK_MAX_OPEN_EXPOSURE_USD = exposure
+        config.RISK_MAX_LOSS_STREAK = loss_streak
+        config.P2P_MAX_ROUTE_PHP = p2p_max_route
+        config.P2P_SETTLEMENT_DELAY_MINS = p2p_delay
+        config.P2P_CANCEL_RATE_PCT = p2p_cancel
+        config.P2P_SPREAD_DECAY_PCT = p2p_decay
+        note = " Applied."
+        if profile != old_profile:
+            note += " Restart to switch data folder."
+        self._risk_action_var.set(note.strip())
+        self._record_decision("system", "risk_settings", "UPDATED", 80, "risk limits saved")
+        self._refresh_risk_tab()
+
+    def _risk_kill(self):
+        self._risk_kill_switch = True
+        self._paused = True
+        self.pause_btn.config(text="Resume")
+        self.status_var.set("Risk kill switch active. Futures entries are stopped.")
+        self._risk_action_var.set("Kill switch active.")
+        self._record_decision("risk", "kill_switch", "BLOCK", 0, "manual kill switch")
+        try:
+            append_event(
+                domain="system",
+                event_type="KILL_SWITCH",
+                status="ACTIVE",
+                amount=0,
+                currency="",
+                pnl=0,
+                balance=self.trader.get_portfolio_value(),
+                symbol_or_route="risk",
+                details="manual dashboard kill switch",
+            )
+        except Exception:
+            pass
+        self._refresh_risk_tab()
+
+    def _risk_resume(self):
+        self._risk_kill_switch = False
+        allowed, reasons = self._risk_allows_trading()
+        if not allowed:
+            self._paused = True
+            self.pause_btn.config(text="Resume")
+            self._risk_action_var.set("Blocked: " + "; ".join(reasons))
+            self._record_decision("risk", "resume", "BLOCK", 0, "; ".join(reasons))
+            self._refresh_risk_tab()
+            return
+        self._paused = False
+        self.pause_btn.config(text="Pause")
+        self._force_event.set()
+        self._risk_action_var.set("Resumed.")
+        self._record_decision("risk", "resume", "RUN", 100, "risk checks passed")
+        self._refresh_risk_tab()
+
+    def _refresh_risk_tab(self):
+        if not hasattr(self, "risk_tree"):
+            return
+        snap = self._risk_snapshot()
+        allowed, reasons = self._risk_allows_trading()
+        state_text = "OK" if allowed else "BLOCKED: " + "; ".join(reasons)
+        self._risk_summary_var.set(
+            f"Profile {snap['profile']}  |  Data {snap['data_dir']}  |  "
+            f"Futures {'paused' if self._paused else 'running'}  |  Risk {state_text}"
+        )
+        for item in self.risk_tree.get_children():
+            self.risk_tree.delete(item)
+
+        def row(metric, value, limit="", status="OK", tag="ok"):
+            self.risk_tree.insert("", "end", values=(metric, value, limit, status), tags=(tag,))
+
+        row("Bot profile", snap["profile"], "restart required after change", "ACTIVE", "ok")
+        row("Data folder", self._clip_text(snap["data_dir"], 64), "", "LOCAL", "ok")
+        row(
+            "Daily futures P&L",
+            f"${snap['daily_pnl']:+,.2f}",
+            f"-${config.RISK_MAX_DAILY_LOSS_USD:,.2f}" if config.RISK_MAX_DAILY_LOSS_USD else "disabled",
+            "BLOCK" if config.RISK_MAX_DAILY_LOSS_USD and snap["daily_pnl"] <= -config.RISK_MAX_DAILY_LOSS_USD else "OK",
+            "block" if config.RISK_MAX_DAILY_LOSS_USD and snap["daily_pnl"] <= -config.RISK_MAX_DAILY_LOSS_USD else "ok",
+        )
+        row(
+            "Open futures notional",
+            f"${snap['open_notional']:,.2f} ({snap['open_count']} positions)",
+            f"${config.RISK_MAX_OPEN_EXPOSURE_USD:,.2f}" if config.RISK_MAX_OPEN_EXPOSURE_USD else "disabled",
+            "BLOCK" if config.RISK_MAX_OPEN_EXPOSURE_USD and snap["open_notional"] >= config.RISK_MAX_OPEN_EXPOSURE_USD else "OK",
+            "block" if config.RISK_MAX_OPEN_EXPOSURE_USD and snap["open_notional"] >= config.RISK_MAX_OPEN_EXPOSURE_USD else "ok",
+        )
+        row(
+            "Loss streak",
+            str(snap["loss_streak"]),
+            str(config.RISK_MAX_LOSS_STREAK) if config.RISK_MAX_LOSS_STREAK else "disabled",
+            "BLOCK" if config.RISK_MAX_LOSS_STREAK and snap["loss_streak"] >= config.RISK_MAX_LOSS_STREAK else "OK",
+            "block" if config.RISK_MAX_LOSS_STREAK and snap["loss_streak"] >= config.RISK_MAX_LOSS_STREAK else "ok",
+        )
+        row("Open margin", f"${snap['open_margin']:,.2f}", "", "TRACK", "ok")
+        row("P2P paper equity", f"{snap['p2p_balance']:,.0f} PHP", "", f"{snap['p2p_realized']:+,.0f} realized", "ok")
+        row(
+            "P2P max route",
+            f"{config.P2P_MAX_ROUTE_PHP:,.0f} PHP" if config.P2P_MAX_ROUTE_PHP else "input capital",
+            "per cycle cap",
+            "ACTIVE" if config.P2P_MAX_ROUTE_PHP else "OFF",
+            "ok",
+        )
+        row(
+            "P2P realism",
+            f"{config.P2P_SETTLEMENT_DELAY_MINS:.0f}m delay | {config.P2P_CANCEL_RATE_PCT:.1f}% cancel | {config.P2P_SPREAD_DECAY_PCT:.3f}% decay",
+            "paper buffer",
+            "ACTIVE",
+            "warn",
+        )
+        row("Backtest files", f"{snap['backtest_count']} | latest {snap['latest_backtest']}", "", "FORWARD TESTING", "ok")
+        self._refresh_decision_tree()
+
+    def _record_decision(
+        self,
+        domain: str,
+        action: str,
+        decision: str,
+        score: float,
+        reason: str,
+        details: str = "",
+    ):
+        row = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "domain": domain,
+            "action": action,
+            "decision": decision,
+            "score": f"{score:.0f}",
+            "reason": reason,
+            "details": details,
+        }
+        self._decision_log.append(row)
+        self._decision_log = self._decision_log[-300:]
+        if hasattr(self, "decision_tree"):
+            try:
+                self.root.after(0, self._refresh_decision_tree)
+            except tk.TclError:
+                pass
+
+    def _refresh_decision_tree(self):
+        if not hasattr(self, "decision_tree"):
+            return
+        for item in self.decision_tree.get_children():
+            self.decision_tree.delete(item)
+        for row in reversed(self._decision_log[-80:]):
+            decision = row.get("decision", "")
+            tag = "block" if decision in {"BLOCK", "SKIP"} else "go" if decision in {"RUN", "FILLED", "UPDATED"} else "wait"
+            self.decision_tree.insert("", "end", tags=(tag,), values=(
+                row.get("timestamp", "")[:16].replace("T", " "),
+                row.get("domain", ""),
+                row.get("action", ""),
+                decision,
+                row.get("score", ""),
+                self._clip_text(row.get("reason", ""), 80),
+            ))
+
+    def _refresh_event_ledger(self):
+        if not hasattr(self, "ledger_tree"):
+            return
+        rows = self.event_ledger.recent(limit=300)
+        for item in self.ledger_tree.get_children():
+            self.ledger_tree.delete(item)
+        for row in reversed(rows):
+            pnl = self._num(row.get("pnl"))
+            domain = row.get("domain", "")
+            tag = "system" if domain == "system" else "profit" if pnl > 0 else "loss" if pnl < 0 else ""
+            currency = row.get("currency", "")
+            self.ledger_tree.insert("", "end", tags=(tag,), values=(
+                row.get("timestamp", "")[:16].replace("T", " "),
+                domain,
+                row.get("event_type", ""),
+                row.get("status", ""),
+                f"{self._num(row.get('amount')):,.2f} {currency}".strip(),
+                f"{pnl:+,.2f}" if pnl else "--",
+                f"{self._num(row.get('balance')):,.2f}" if self._num(row.get("balance")) else "--",
+                row.get("symbol_or_route", ""),
+                self._clip_text(row.get("details", ""), 72),
+            ))
+        self._ledger_summary_var.set(f"{len(rows)} recent event(s)  |  CSV: {self.event_ledger.path}")
+
+    def _export_ops_report(self):
+        out = self._write_ops_report()
+        if hasattr(self, "_risk_action_var"):
+            self._risk_action_var.set(f"Report exported: {out.name}")
+        return out
+
+    def _write_ops_report(self):
+        snap = self._risk_snapshot()
+        stats = self.trader.get_stats()
+        allowed, reasons = self._risk_allows_trading()
+        p2p_state = self.p2p_paper.state(self._p2p_starting_capital_php())
+        ledger_rows = self.event_ledger.recent(limit=25)
+        decisions = self._decision_log[-25:]
+        generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines = [
+            "TradingBot23 Operations Report",
+            f"Generated: {generated}",
+            "",
+            f"Profile: {snap['profile']}",
+            f"Data folder: {snap['data_dir']}",
+            f"Risk state: {'OK' if allowed else 'BLOCKED - ' + '; '.join(reasons)}",
+            "",
+            "Futures",
+            f"  Portfolio: ${snap['portfolio']:,.2f}",
+            f"  Cash: ${snap['cash']:,.2f}",
+            f"  Daily closed P&L: ${snap['daily_pnl']:+,.2f}",
+            f"  Open positions: {snap['open_count']}",
+            f"  Open notional: ${snap['open_notional']:,.2f}",
+            f"  Trades: {stats.get('total_trades', 0)} | Win rate: {stats.get('win_rate', 0):.1f}%",
+            "",
+            "P2P Paper",
+            f"  Balance: {self._num(p2p_state.get('balance_php')):,.0f} PHP",
+            f"  Cash: {self._num(p2p_state.get('cash_php')):,.0f} PHP",
+            f"  Realized: {self._num(p2p_state.get('realized_profit_php')):+,.0f} PHP",
+            f"  Transactions: {len(p2p_state.get('transactions', []))}",
+            "",
+            "Recent Decisions",
+        ]
+        for row in decisions:
+            lines.append(
+                f"  {row['timestamp'][:16]} {row['domain']} {row['action']} "
+                f"{row['decision']} score={row['score']} {row['reason']}"
+            )
+        lines.append("")
+        lines.append("Recent Ledger Events")
+        for row in ledger_rows:
+            lines.append(
+                f"  {row.get('timestamp','')[:16]} {row.get('domain','')} "
+                f"{row.get('event_type','')} {row.get('status','')} "
+                f"pnl={row.get('pnl','')} {row.get('details','')}"
+            )
+        out = config.DATA_DIR / f"ops_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return out
+
     def _on_tab_changed(self, event):
         nb  = event.widget
         tab = nb.tab(nb.select(), "text").strip()
-        if tab == "Charts":
+        if tab == "Risk":
+            self._refresh_risk_tab()
+        elif tab == "Charts":
             self._draw_charts()
         elif tab == "History":
             self._refresh_history()
@@ -2014,6 +2636,8 @@ class Dashboard:
             self._refresh_p2p()
         elif tab == "P2P History":
             self._refresh_p2p_history_tab()
+        elif tab == "Ledger":
+            self._refresh_event_ledger()
 
     # ── Button handlers ────────────────────────────────────────────────────────
 
@@ -2025,23 +2649,37 @@ class Dashboard:
         if not self._settings_confirmed:
             self._require_settings_confirmation("Review Settings and click Apply Settings before running futures.")
             return
+        allowed, reasons = self._risk_allows_trading()
+        if not allowed:
+            self.status_var.set("Run blocked by risk guard: " + "; ".join(reasons))
+            self._record_decision("risk", "run_now", "BLOCK", 0, "; ".join(reasons))
+            return
         if self._paused:
             self._paused = False
             self.pause_btn.config(text="Pause")
         self._force_event.set()
+        self._record_decision("futures", "run_now", "RUN", 100, "manual run requested")
         self.status_var.set("Running cycle now...")
 
     def _on_pause_resume(self):
         if not self._settings_confirmed:
             self._require_settings_confirmation("Review Settings and click Apply Settings before starting futures.")
             return
+        if self._paused:
+            allowed, reasons = self._risk_allows_trading()
+            if not allowed:
+                self.status_var.set("Resume blocked by risk guard: " + "; ".join(reasons))
+                self._record_decision("risk", "resume", "BLOCK", 0, "; ".join(reasons))
+                return
         self._paused = not self._paused
         if self._paused:
             self.pause_btn.config(text="Resume")
             self.status_var.set("Paused")
+            self._record_decision("futures", "pause", "BLOCK", 0, "manual pause")
         else:
             self.pause_btn.config(text="Pause")
             self._force_event.set()
+            self._record_decision("futures", "resume", "RUN", 100, "manual resume")
             self.status_var.set("Resumed")
 
     # ── Trading loop ───────────────────────────────────────────────────────────
@@ -2074,7 +2712,31 @@ class Dashboard:
 
             # Full cycle every 5 min: check positions + scan dips + fill empty slots
             try:
-                summary = self.strategy.run_cycle()
+                allowed, reasons = self._risk_allows_trading()
+                if not allowed:
+                    closed = self.trader.check_positions()
+                    summary = {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "basket_refreshed": False,
+                        "cash_contributed": 0.0,
+                        "dips_found": 0,
+                        "positions_opened": 0,
+                        "positions_closed": len(closed),
+                        "slots_filled": 0,
+                        "risk_blocked": True,
+                        "risk_reasons": reasons,
+                    }
+                    self._record_decision("risk", "cycle", "BLOCK", 0, "; ".join(reasons))
+                else:
+                    summary = self.strategy.run_cycle()
+                    self._record_decision(
+                        "futures",
+                        "cycle",
+                        "RUN",
+                        80,
+                        f"dips {summary.get('dips_found', 0)} opened {summary.get('positions_opened', 0)} "
+                        f"filled {summary.get('slots_filled', 0)} closed {summary.get('positions_closed', 0)}",
+                    )
                 self._last_cycle_time    = datetime.now(timezone.utc)
                 self._last_cycle_summary = summary
                 self._next_cycle_ts      = now_ts + scan_interval
@@ -2130,6 +2792,10 @@ class Dashboard:
             self._update_basket()
             self._update_contribution_schedule()
             self._maybe_refresh_p2p_tab()
+            if hasattr(self, "notebook"):
+                tab = self.notebook.tab(self.notebook.select(), "text").strip()
+                if tab == "Risk":
+                    self._refresh_risk_tab()
         except Exception:
             logger.debug("Dashboard refresh error", exc_info=True)
 
@@ -2155,6 +2821,10 @@ class Dashboard:
             return
         if self._paused:
             self.status_var.set("Paused. Press Resume to start futures paper trading.")
+            return
+        allowed, reasons = self._risk_allows_trading()
+        if not allowed:
+            self.status_var.set("Risk guard active; monitoring exits only: " + "; ".join(reasons))
             return
         if self._last_cycle_time is None:
             self.status_var.set("Waiting for first cycle...")
