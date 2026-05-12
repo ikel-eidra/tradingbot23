@@ -723,19 +723,9 @@ class Dashboard:
         top = tk.Frame(body, bg="#0d1117")
         top.pack(fill="x", pady=(0, 8))
 
-        ttk.Label(top, text="USDT/PHP P2P CYCLE COMMAND CENTER", style="Header.TLabel",
+        ttk.Label(top, text="USDT/PHP P2P ASSIST", style="Header.TLabel",
                   background="#0d1117").pack(side="left")
-        ttk.Button(top, text="Reset Paper", style="Btn.TButton",
-                   command=self._reset_p2p_paper).pack(side="right", padx=(6, 0))
-        ttk.Button(top, text="Check Hold Sell", style="Btn.TButton",
-                   command=self._check_p2p_hold_sell).pack(side="right", padx=(6, 0))
-        ttk.Button(top, text="Buy Hold", style="Btn.TButton",
-                   command=self._paper_hold_buy_now).pack(side="right", padx=(6, 0))
-        ttk.Button(top, text="Paper Cycle Now", style="Btn.TButton",
-                   command=self._paper_cycle_now).pack(side="right", padx=(6, 0))
-        ttk.Button(top, text="Log Top Route", style="Btn.TButton",
-                   command=self._log_top_p2p_route).pack(side="right", padx=(6, 0))
-        ttk.Button(top, text="Refresh", style="Btn.TButton",
+        ttk.Button(top, text="Refresh Prices", style="Btn.TButton",
                    command=self._refresh_p2p).pack(side="right")
 
         controls = tk.Frame(body, bg="#0d1117")
@@ -751,6 +741,7 @@ class Dashboard:
         self._p2p_auto_log = tk.BooleanVar(value=False)
         self._p2p_auto_paper = tk.BooleanVar(value=False)
         self._p2p_auto_hold_sell = tk.BooleanVar(value=True)
+        self._p2p_mode = tk.StringVar(value="paper")
 
         for label_text, var, width in [
             ("Capital PHP", self._p2p_capital_php, 10),
@@ -779,56 +770,73 @@ class Dashboard:
                 highlightcolor="#58a6ff",
             ).pack(anchor="w")
 
+        mode_group = tk.Frame(controls, bg="#0d1117")
+        mode_group.pack(side="left", padx=(0, 12), pady=(13, 0))
+        for value, text in [("paper", "Paper Sim"), ("live", "Live Assist")]:
+            tk.Radiobutton(
+                mode_group,
+                text=text,
+                value=value,
+                variable=self._p2p_mode,
+                command=self._sync_p2p_mode_controls,
+                bg="#0d1117",
+                fg="#c9d1d9",
+                selectcolor="#161b22",
+                activebackground="#0d1117",
+                activeforeground="#58a6ff",
+                font=("Consolas", 9),
+            ).pack(side="left", padx=(0, 8))
+
         ttk.Button(controls, text="Recalculate", style="Btn.TButton",
                    command=self._recalculate_p2p_routes).pack(side="left", padx=(0, 12), pady=(13, 0))
-        tk.Checkbutton(
-            controls,
-            text="Alert",
-            variable=self._p2p_auto_alert,
-            bg="#0d1117",
-            fg="#c9d1d9",
-            selectcolor="#161b22",
-            activebackground="#0d1117",
-            activeforeground="#58a6ff",
-            font=("Consolas", 9),
-        ).pack(side="left", pady=(13, 0))
-        tk.Checkbutton(
-            controls,
-            text="Auto Log",
-            variable=self._p2p_auto_log,
-            bg="#0d1117",
-            fg="#c9d1d9",
-            selectcolor="#161b22",
-            activebackground="#0d1117",
-            activeforeground="#58a6ff",
-            font=("Consolas", 9),
-        ).pack(side="left", padx=(10, 0), pady=(13, 0))
-        tk.Checkbutton(
-            controls,
-            text="Paper Fill",
+
+        action_bar = tk.Frame(body, bg="#0d1117")
+        action_bar.pack(fill="x", pady=(0, 8))
+
+        self._p2p_paper_actions = tk.Frame(action_bar, bg="#0d1117")
+        ttk.Button(self._p2p_paper_actions, text="Run Instant Paper Cycle", style="Btn.TButton",
+                   command=self._paper_cycle_now).pack(side="left", padx=(0, 6))
+        ttk.Button(self._p2p_paper_actions, text="Open Paper Hold", style="Btn.TButton",
+                   command=self._paper_hold_buy_now).pack(side="left", padx=(0, 6))
+        ttk.Button(self._p2p_paper_actions, text="Check / Sell Hold", style="Btn.TButton",
+                   command=self._check_p2p_hold_sell).pack(side="left", padx=(0, 6))
+        ttk.Button(self._p2p_paper_actions, text="Reset Paper", style="Btn.TButton",
+                   command=self._reset_p2p_paper).pack(side="left", padx=(0, 12))
+        self._p2p_paper_auto = self._p2p_checkbutton(
+            self._p2p_paper_actions,
+            text="Auto Cycle",
             variable=self._p2p_auto_paper,
-            bg="#0d1117",
-            fg="#c9d1d9",
-            selectcolor="#161b22",
-            activebackground="#0d1117",
-            activeforeground="#58a6ff",
-            font=("Consolas", 9),
-        ).pack(side="left", padx=(10, 0), pady=(13, 0))
-        tk.Checkbutton(
-            controls,
-            text="Hold Sell",
+        )
+        self._p2p_paper_auto.pack(side="left", padx=(0, 10))
+        self._p2p_hold_auto = self._p2p_checkbutton(
+            self._p2p_paper_actions,
+            text="Auto Hold Sell",
             variable=self._p2p_auto_hold_sell,
-            bg="#0d1117",
-            fg="#c9d1d9",
-            selectcolor="#161b22",
-            activebackground="#0d1117",
-            activeforeground="#58a6ff",
-            font=("Consolas", 9),
-        ).pack(side="left", padx=(10, 0), pady=(13, 0))
+        )
+        self._p2p_hold_auto.pack(side="left")
+
+        self._p2p_live_actions = tk.Frame(action_bar, bg="#0d1117")
+        ttk.Button(self._p2p_live_actions, text="Send Live Snapshot", style="Btn.TButton",
+                   command=self._send_p2p_live_snapshot).pack(side="left", padx=(0, 6))
+        ttk.Button(self._p2p_live_actions, text="Log Watch Route", style="Btn.TButton",
+                   command=self._log_top_p2p_route).pack(side="left", padx=(0, 12))
+        self._p2p_live_alert = self._p2p_checkbutton(
+            self._p2p_live_actions,
+            text="Telegram Alerts",
+            variable=self._p2p_auto_alert,
+        )
+        self._p2p_live_alert.pack(side="left", padx=(0, 10))
+        self._p2p_live_log = self._p2p_checkbutton(
+            self._p2p_live_actions,
+            text="Auto Watch Log",
+            variable=self._p2p_auto_log,
+        )
+        self._p2p_live_log.pack(side="left")
 
         self._p2p_status_var = tk.StringVar(value="Open this tab or press Refresh to load prices.")
         ttk.Label(body, textvariable=self._p2p_status_var, foreground="#8b949e",
                   background="#0d1117", font=("Consolas", 9)).pack(fill="x", anchor="w")
+        self._sync_p2p_mode_controls()
 
         summary = tk.Frame(body, bg="#0d1117")
         summary.pack(fill="x", pady=(8, 10))
@@ -948,6 +956,42 @@ class Dashboard:
         self.p2p_tx_tree.tag_configure("loss", foreground="#f85149")
         self.p2p_tx_tree.pack(fill="both", expand=True)
         self._refresh_p2p_transactions()
+
+    def _p2p_checkbutton(self, parent, text: str, variable: tk.BooleanVar):
+        return tk.Checkbutton(
+            parent,
+            text=text,
+            variable=variable,
+            bg="#0d1117",
+            fg="#c9d1d9",
+            selectcolor="#161b22",
+            activebackground="#0d1117",
+            activeforeground="#58a6ff",
+            font=("Consolas", 9),
+        )
+
+    def _p2p_current_mode(self) -> str:
+        if not hasattr(self, "_p2p_mode"):
+            return "paper"
+        return self._p2p_mode.get() or "paper"
+
+    def _sync_p2p_mode_controls(self):
+        if not hasattr(self, "_p2p_paper_actions") or not hasattr(self, "_p2p_live_actions"):
+            return
+        self._p2p_paper_actions.pack_forget()
+        self._p2p_live_actions.pack_forget()
+        if self._p2p_current_mode() == "live":
+            self._p2p_live_actions.pack(side="left", fill="x")
+            if hasattr(self, "_p2p_status_var"):
+                self._p2p_status_var.set(
+                    "Live Assist: scan, alert, and log only. No P2P order, fiat, or release is automated."
+                )
+        else:
+            self._p2p_paper_actions.pack(side="left", fill="x")
+            if hasattr(self, "_p2p_status_var"):
+                self._p2p_status_var.set(
+                    "Paper Sim: Instant Cycle closes immediately; Paper Hold keeps USDT until target."
+                )
 
     def _build_p2p_table(self, parent, title: str, height: int):
         section = tk.Frame(parent, bg="#0d1117")
@@ -1082,11 +1126,13 @@ class Dashboard:
                     )
                 )
 
-        self._run_p2p_live_assist(settings)
-        if self._p2p_auto_paper.get():
-            self._execute_p2p_paper_cycle(auto=True)
-        if self._p2p_auto_hold_sell.get():
-            self._evaluate_p2p_hold(auto=True)
+        if self._p2p_current_mode() == "live":
+            self._run_p2p_live_assist(settings)
+        else:
+            if self._p2p_auto_paper.get():
+                self._execute_p2p_paper_cycle(auto=True)
+            if self._p2p_auto_hold_sell.get():
+                self._evaluate_p2p_hold(auto=True)
 
     def _p2p_route_settings(self) -> P2PRouteSettings | None:
         try:
@@ -1223,10 +1269,31 @@ class Dashboard:
         self._p2p_last_alert_ts = now
         tg.alert_p2p_signal(text)
 
+    def _send_p2p_live_snapshot(self):
+        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+            self._p2p_status_var.set("Telegram snapshot needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env.")
+            return
+        self._p2p_status_var.set("Sending live P2P snapshot to Telegram...")
+
+        def worker():
+            try:
+                text = self._telegram_p2p_snapshot()
+                tg.send_dashboard_text(text)
+                status = "Live P2P snapshot sent to Telegram."
+            except Exception as exc:
+                logger.exception("Failed to send P2P Telegram snapshot")
+                status = f"Telegram P2P snapshot failed: {exc}"
+            try:
+                self.root.after(0, lambda: self._p2p_status_var.set(status))
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _paper_cycle_now(self):
         if not self._p2p_last_snapshot:
             self._refresh_p2p()
-            self._p2p_status_var.set("Loading prices first; press Paper Cycle Now again after refresh.")
+            self._p2p_status_var.set("Loading prices first; press Run Instant Paper Cycle again after refresh.")
             return
         self._recalculate_p2p_routes(update_status=False)
         self._execute_p2p_paper_cycle(auto=False)
@@ -1234,7 +1301,7 @@ class Dashboard:
     def _paper_hold_buy_now(self):
         if not self._p2p_last_snapshot:
             self._refresh_p2p()
-            self._p2p_status_var.set("Loading prices first; press Buy Hold again after refresh.")
+            self._p2p_status_var.set("Loading prices first; press Open Paper Hold again after refresh.")
             return
         settings = self._p2p_route_settings()
         if not settings:
@@ -1281,7 +1348,7 @@ class Dashboard:
     def _check_p2p_hold_sell(self):
         if not self._p2p_last_snapshot:
             self._refresh_p2p()
-            self._p2p_status_var.set("Loading prices first; press Check Hold Sell again after refresh.")
+            self._p2p_status_var.set("Loading prices first; press Check / Sell Hold again after refresh.")
             return
         self._evaluate_p2p_hold(auto=False)
 

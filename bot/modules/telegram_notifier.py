@@ -92,6 +92,10 @@ def send_dashboard_menu(text: str | None = None) -> None:
     )
 
 
+def send_dashboard_text(text: str) -> None:
+    _send(text, reply_markup=dashboard_keyboard())
+
+
 def alert_p2p_signal(text: str) -> None:
     _send(
         f"📣 <b>TradingBot23 P2P Assist</b>\n{text}",

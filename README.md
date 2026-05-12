@@ -225,6 +225,18 @@ The **P2P Arb** tab is a read-only USDT/PHP cycle command center. It pulls Binan
 
 The route and paper-hold estimates are informational only. The app does not place P2P orders, send fiat, mark payment complete, verify fiat receipt, release crypto, or handle disputes. Manual fiat verification is required before releasing crypto or treating any real cycle as complete.
 
+### P2P Modes
+
+| Mode | Action | What Changes |
+|---|---|---|
+| Paper Sim | Run Instant Paper Cycle | Simulates buy and sell from the same snapshot. If net profit meets the threshold, PHP profit is added immediately and no USDT remains open. |
+| Paper Sim | Open Paper Hold | Simulates buying USDT now. Paper cash goes down, hold USDT appears, and the app waits for a later sell-side quote. |
+| Paper Sim | Check / Sell Hold | Marks the open paper hold against current buyer prices. It closes only when the configured net profit threshold is reached. |
+| Live Assist | Send Live Snapshot | Sends the current P2P dashboard to Telegram. No balances change. |
+| Live Assist | Log Watch Route | Saves the current top route to `data/p2p_cycle_journal.csv`. No balances change. |
+
+Use **Paper Sim** to test compounding behavior. Use **Live Assist** when watching real listings and manually executing outside the app.
+
 ---
 
 ## Building the EXE (Developers)
