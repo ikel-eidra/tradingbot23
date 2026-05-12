@@ -956,11 +956,11 @@ class Dashboard:
     # ── P2P arbitrage tab ────────────────────────────────────────────────────
 
     def _build_p2p_tab(self, parent):
-        body = tk.Frame(parent, bg="#0d1117", padx=15, pady=12)
+        body = tk.Frame(parent, bg="#0d1117", padx=15, pady=8)
         body.pack(fill="both", expand=True)
 
         top = tk.Frame(body, bg="#0d1117")
-        top.pack(fill="x", pady=(0, 8))
+        top.pack(fill="x", pady=(0, 4))
 
         ttk.Label(top, text="USDT/PHP P2P ASSIST", style="Header.TLabel",
                   background="#0d1117").pack(side="left")
@@ -968,7 +968,7 @@ class Dashboard:
                    command=self._refresh_p2p).pack(side="right")
 
         controls = tk.Frame(body, bg="#0d1117")
-        controls.pack(fill="x", pady=(0, 8))
+        controls.pack(fill="x", pady=(0, 4))
 
         saved_p2p_state = self.p2p_paper.state()
         saved_p2p_capital = self._num(saved_p2p_state.get("starting_php"), 500_000)
@@ -998,7 +998,7 @@ class Dashboard:
             ("Decay %", self._p2p_spread_decay, 6),
         ]:
             group = tk.Frame(controls, bg="#0d1117")
-            group.pack(side="left", padx=(0, 12))
+            group.pack(side="left", padx=(0, 8))
             ttk.Label(group, text=label_text, foreground="#8b949e", background="#0d1117",
                       font=("Consolas", 8)).pack(anchor="w")
             tk.Entry(
@@ -1019,7 +1019,7 @@ class Dashboard:
             ).pack(anchor="w")
 
         mode_group = tk.Frame(controls, bg="#0d1117")
-        mode_group.pack(side="left", padx=(0, 12), pady=(13, 0))
+        mode_group.pack(side="left", padx=(0, 10), pady=(10, 0))
         for value, text in [("paper", "Paper Sim (Live Data)"), ("live", "Live Assist")]:
             tk.Radiobutton(
                 mode_group,
@@ -1036,10 +1036,10 @@ class Dashboard:
             ).pack(side="left", padx=(0, 8))
 
         ttk.Button(controls, text="Recalculate Only", style="Btn.TButton",
-                   command=self._recalculate_p2p_routes).pack(side="left", padx=(0, 12), pady=(13, 0))
+                   command=self._recalculate_p2p_routes).pack(side="left", padx=(0, 10), pady=(10, 0))
 
         action_bar = tk.Frame(body, bg="#0d1117")
-        action_bar.pack(fill="x", pady=(0, 8))
+        action_bar.pack(fill="x", pady=(0, 4))
 
         self._p2p_paper_actions = tk.Frame(action_bar, bg="#0d1117")
         ttk.Button(self._p2p_paper_actions, text="Paper Buy+Sell", style="Btn.TButton",
@@ -1095,7 +1095,7 @@ class Dashboard:
         self._sync_p2p_mode_controls()
 
         summary = tk.Frame(body, bg="#0d1117")
-        summary.pack(fill="x", pady=(8, 10))
+        summary.pack(fill="x", pady=(4, 6))
 
         self._p2p_buy_var = tk.StringVar(value="--")
         self._p2p_sell_var = tk.StringVar(value="--")
@@ -1119,20 +1119,20 @@ class Dashboard:
         ]:
             card = tk.Frame(summary, bg="#161b22",
                             highlightbackground="#30363d", highlightthickness=1)
-            card.pack(side="left", padx=(0, 6), ipadx=8, ipady=6)
+            card.pack(side="left", padx=(0, 5), ipadx=7, ipady=4)
             ttk.Label(card, text=label_text, foreground="#8b949e", background="#161b22",
                       font=("Consolas", 8)).pack(anchor="w")
             ttk.Label(card, textvariable=var, foreground="#58a6ff", background="#161b22",
-                      font=("Consolas", 14, "bold")).pack(anchor="w")
+                      font=("Consolas", 12, "bold")).pack(anchor="w")
         self._refresh_p2p_paper_summary()
 
         route_section = tk.Frame(body, bg="#0d1117")
-        route_section.pack(fill="x", expand=False, pady=(0, 6))
+        route_section.pack(fill="x", expand=False, pady=(0, 4))
         ttk.Label(route_section, text="ROUTE CALCULATOR", style="Header.TLabel",
                   background="#0d1117").pack(anchor="w", pady=(0, 3))
 
         route_cols = ("route", "size", "buy", "sell", "profit", "pct", "grade", "warnings")
-        self.p2p_route_tree = ttk.Treeview(route_section, columns=route_cols, show="headings", height=3)
+        self.p2p_route_tree = ttk.Treeview(route_section, columns=route_cols, show="headings", height=2)
         for col, heading, width in [
             ("route", "ROUTE", 115),
             ("size", "SIZE PHP", 95),
@@ -1141,7 +1141,7 @@ class Dashboard:
             ("profit", "NET PHP", 95),
             ("pct", "NET %", 65),
             ("grade", "GRADE", 65),
-            ("warnings", "WARNINGS", 220),
+            ("warnings", "WARNINGS", 200),
         ]:
             self.p2p_route_tree.heading(col, text=heading)
             self.p2p_route_tree.column(col, width=width, anchor="center")
@@ -1155,6 +1155,8 @@ class Dashboard:
 
         ad_tables = tk.Frame(body, bg="#0d1117")
         ad_tables.pack(fill="both", expand=True)
+        ad_tables.configure(height=300)
+        ad_tables.pack_propagate(False)
         buy_parent = tk.Frame(ad_tables, bg="#0d1117")
         sell_parent = tk.Frame(ad_tables, bg="#0d1117")
         buy_parent.pack(side="left", fill="both", expand=True, padx=(0, 6))
@@ -1273,7 +1275,7 @@ class Dashboard:
 
     def _build_p2p_table(self, parent, title: str, height: int):
         section = tk.Frame(parent, bg="#0d1117")
-        section.pack(fill="both", expand=True, pady=(0, 10))
+        section.pack(fill="both", expand=True, pady=(0, 2))
 
         ttk.Label(section, text=title, style="Header.TLabel",
                   background="#0d1117").pack(anchor="w", pady=(0, 3))
@@ -1283,26 +1285,24 @@ class Dashboard:
 
         cols = ("price", "limits", "available", "methods", "advertiser", "finish", "orders")
         tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=height)
-        for col, heading, width in [
-            ("price", "PRICE PHP", 75),
-            ("limits", "LIMIT PHP", 125),
-            ("available", "AVAIL USDT", 90),
-            ("methods", "PAYMENT", 155),
-            ("advertiser", "ADVERTISER", 115),
-            ("finish", "FINISH", 60),
-            ("orders", "ORDERS", 60),
+        for col, heading, width, stretch in [
+            ("price", "PRICE PHP", 82, False),
+            ("limits", "LIMIT PHP", 135, False),
+            ("available", "AVAIL USDT", 105, False),
+            ("methods", "PAYMENT", 150, True),
+            ("advertiser", "ADVERTISER", 145, True),
+            ("finish", "FINISH", 68, False),
+            ("orders", "ORDERS", 68, False),
         ]:
             tree.heading(col, text=heading)
-            tree.column(col, width=width, minwidth=50, anchor="center", stretch=False)
+            tree.column(col, width=width, minwidth=55, anchor="center", stretch=stretch)
 
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
-        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
-        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.configure(yscrollcommand=vsb.set)
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
         tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
         return tree
 
     def _refresh_p2p(self):
@@ -1525,6 +1525,7 @@ class Dashboard:
                 route.grade,
                 self._clip_text(warnings, 34),
             ))
+        self.p2p_route_tree.yview_moveto(0)
 
     def _update_p2p_sweep_summary(self):
         if not self._p2p_sweep:
@@ -2026,6 +2027,7 @@ class Dashboard:
                 self._format_rate(ad.completion_rate),
                 str(ad.orders) if ad.orders is not None else "--",
             ))
+        tree.yview_moveto(0)
 
     @staticmethod
     def _format_rate(rate: float | None) -> str:
