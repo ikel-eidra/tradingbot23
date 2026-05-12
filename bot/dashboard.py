@@ -19,6 +19,7 @@ import csv as _csv
 
 from bot import config
 from bot.modules import accounting
+from bot.modules import telegram_notifier as tg
 from bot.modules.futures_trader import _history_csv
 from bot.modules.p2p_arbitrage import (
     P2PDepthSweep,
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 class Dashboard:
     REFRESH_MS = 2000
     P2P_REFRESH_SECS = 60
+    P2P_ALERT_COOLDOWN_SECS = 300
 
     def __init__(self, strategy):
         self.strategy = strategy
@@ -59,6 +61,11 @@ class Dashboard:
         self._p2p_routes: list[P2PRoute] = []
         self._p2p_sweep: P2PDepthSweep | None = None
         self._p2p_next_refresh_ts = 0.0
+        self._p2p_settings_cache = P2PRouteSettings()
+        self._p2p_last_alert_key = ""
+        self._p2p_last_alert_ts = 0.0
+        self._p2p_last_logged_route_key = ""
+        self._telegram_commands = None
 
         # Equity history: list of (datetime, portfolio_value)
         self._equity_history: list[tuple[datetime, float]] = []
@@ -71,6 +78,7 @@ class Dashboard:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_ui()
+        self._start_telegram_dashboard()
         self._start_trading_loop()
         self._schedule_refresh()
 
@@ -160,6 +168,8 @@ class Dashboard:
         self.pause_btn = ttk.Button(ctrl, text=pause_text,    style="Btn.TButton", command=self._on_pause_resume)
         self.run_btn.pack(side="left", padx=(0, 6))
         self.pause_btn.pack(side="left", padx=(0, 12))
+        ttk.Button(ctrl, text="Telegram Menu", style="Btn.TButton",
+                   command=self._send_telegram_menu).pack(side="left", padx=(0, 12))
 
         if not self._settings_confirmed:
             initial_status = "First run: review Settings and click Apply Settings before trading."
@@ -233,6 +243,146 @@ class Dashboard:
         ttk.Label(basket_frame, text="FutolTech  |  Futol Ethical Technology Ecosystems",
                   foreground="#388bfd", background="#161b22",
                   font=("Consolas", 8, "bold")).pack(side="right", anchor="e")
+
+    def _start_telegram_dashboard(self):
+        self._telegram_commands = tg.TelegramDashboardPoller(
+            futures_callback=self._telegram_futures_snapshot,
+            p2p_callback=self._telegram_p2p_snapshot,
+            info_callback=self._telegram_info_text,
+        )
+        self._telegram_commands.start()
+
+    def _send_telegram_menu(self):
+        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+            self.status_var.set("Telegram dashboard needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env.")
+            return
+        tg.send_dashboard_menu("TradingBot23 dashboard controls:")
+        self.status_var.set("Telegram dashboard menu sent.")
+
+    def _telegram_futures_snapshot(self) -> str:
+        portfolio = self.trader.get_portfolio_value()
+        cash = self.trader.cash_balance
+        stats = self.trader.get_stats()
+        initial = (
+            self.trader.get_contributed_capital()
+            if hasattr(self.trader, "get_contributed_capital")
+            else config.CAPITAL_USD
+        )
+        pnl_pct = ((portfolio - initial) / initial) * 100 if initial > 0 else 0.0
+        open_positions = list(self.trader.get_open_positions())
+        total_pnl = sum(p.pnl_usd for p in self.trader.get_trade_history())
+        last_scan = (
+            self._last_cycle_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+            if self._last_cycle_time
+            else "not run yet"
+        )
+        mode = "paused" if self._paused else "running"
+        lines = [
+            "📊 <b>TradingBot23 Futures Paper</b>",
+            f"Mode: <b>{mode}</b>  |  New trades: <b>{config.LEVERAGE}x cross</b>",
+            f"Portfolio: <b>${portfolio:,.2f}</b>  |  Cash: <b>${cash:,.2f}</b>",
+            f"PNL: <b>{pnl_pct:+.2f}%</b>  |  Realized: <b>${total_pnl:+,.2f}</b>",
+            f"Open: <b>{len(open_positions)}</b>  |  Trades: <b>{stats.get('total_trades', 0)}</b>  |  Win: <b>{stats.get('win_rate', 0):.1f}%</b>",
+            f"Last scan: {last_scan}",
+        ]
+        if open_positions:
+            lines.append("")
+            lines.append("<b>Open positions</b>")
+            for pos in open_positions[:6]:
+                current = pos.last_known_price or pos.entry_price
+                lines.append(
+                    f"{tg.escape_html(pos.symbol)} {pos.leverage}x | "
+                    f"${pos.margin_used:,.2f} | now ${current:,.4f} | "
+                    f"PNL {pos.pnl_pct:+.2f}% | liq ${pos.liquidation_price:,.4f}"
+                )
+            if len(open_positions) > 6:
+                lines.append(f"+{len(open_positions) - 6} more open position(s)")
+        return "\n".join(lines)
+
+    def _telegram_p2p_snapshot(self) -> str:
+        settings = self._p2p_settings_cache
+        stale_note = ""
+        try:
+            snapshot = self.p2p_monitor.fetch_snapshot(rows=20)
+        except Exception as exc:
+            if not self._p2p_last_snapshot:
+                raise
+            snapshot = self._p2p_last_snapshot
+            stale_note = f"\nUsing last UI snapshot; live refresh failed: {tg.escape_html(exc)}"
+
+        routes = build_p2p_routes([snapshot], settings=settings)
+        sweep = build_depth_sweep([snapshot], settings=settings)
+        state = self.p2p_paper.state(settings.capital_php)
+        return self._format_p2p_dashboard_text(snapshot, routes, sweep, state, settings) + stale_note
+
+    def _telegram_info_text(self) -> str:
+        return (
+            "<b>TradingBot23 Live Assist Scope</b>\n"
+            "Futures: paper portfolio, open positions, trade stats, and daily summary alerts.\n"
+            "P2P: live USDT/PHP scan, spread scoring, Telegram alerts, watchlist log, paper ledger, and hold-exit checks.\n\n"
+            "Manual in real P2P: choose counterparty, send fiat, confirm payment, verify receipt, release crypto, and handle disputes.\n"
+            "Commands: /dashboard, /p2p, /info"
+        )
+
+    def _format_p2p_dashboard_text(
+        self,
+        snapshot: P2PSnapshot,
+        routes: list[P2PRoute],
+        sweep: P2PDepthSweep | None,
+        state: dict,
+        settings: P2PRouteSettings,
+    ) -> str:
+        best_buy = snapshot.best_buy
+        best_sell = snapshot.best_sell
+        as_of = snapshot.as_of.strftime("%Y-%m-%d %H:%M:%S UTC") if snapshot.as_of else "unknown"
+        balance = self._num(state.get("balance_php"))
+        cash = self._num(state.get("cash_php"), balance)
+        realized = self._num(state.get("realized_profit_php"))
+        hold = state.get("hold_position") or {}
+        lines = [
+            "📊 <b>TradingBot23 P2P Arb</b>",
+            f"USDT/PHP updated: {as_of}",
+            f"Capital: <b>{settings.capital_php:,.0f} PHP</b>  |  Min net: <b>{settings.min_profit_pct:.3f}%</b>",
+            f"Paper balance: <b>{balance:,.0f} PHP</b>  |  Cash: <b>{cash:,.0f} PHP</b>  |  Realized: <b>{realized:+,.0f} PHP</b>",
+        ]
+        if best_buy and best_sell:
+            lines.append(
+                f"Best buy: <b>{best_buy.price:,.2f}</b> | "
+                f"Best sell: <b>{best_sell.price:,.2f}</b> | "
+                f"Raw spread: <b>{(snapshot.spread or 0):+.2f}</b> PHP"
+            )
+        if sweep:
+            warnings = "; ".join(sweep.warnings) if sweep.warnings else "ok"
+            lines.extend([
+                "",
+                "<b>Depth sweep</b>",
+                f"Size: {sweep.size_php:,.0f} PHP",
+                f"Avg buy/sell: {sweep.avg_buy_price:,.2f} / {sweep.avg_sell_price:,.2f}",
+                f"Net: <b>{sweep.profit_php:+,.0f} PHP ({sweep.profit_pct:+.3f}%)</b> | Grade {sweep.grade}",
+                f"Warnings: {tg.escape_html(warnings)}",
+            ])
+        elif routes:
+            top = routes[0]
+            warnings = "; ".join(top.warnings) if top.warnings else "ok"
+            lines.extend([
+                "",
+                "<b>Top route</b>",
+                f"{tg.escape_html(top.route_label)} | {top.size_php:,.0f} PHP",
+                f"Net: <b>{top.profit_php:+,.0f} PHP ({top.profit_pct:+.3f}%)</b> | Grade {top.grade}",
+                f"Warnings: {tg.escape_html(warnings)}",
+            ])
+        else:
+            lines.append("No P2P route meets current capacity filters.")
+        if hold:
+            last_profit = self._num(hold.get("last_profit_php"))
+            last_pct = self._num(hold.get("last_profit_pct"))
+            lines.extend([
+                "",
+                "<b>Open P2P hold</b>",
+                f"{self._num(hold.get('usdt')):,.2f} USDT @ {self._num(hold.get('avg_buy_price')):,.2f}",
+                f"Marked P&L: {last_profit:+,.0f} PHP ({last_pct:+.3f}%)",
+            ])
+        return "\n".join(lines)
 
     def _build_open_tab(self, parent):
         # Open positions
@@ -597,6 +747,8 @@ class Dashboard:
         self._p2p_min_profit_pct = tk.StringVar(value="0.10")
         self._p2p_transfer_fee_usdt = tk.StringVar(value="1.0")
         self._p2p_buffer_php = tk.StringVar(value="0")
+        self._p2p_auto_alert = tk.BooleanVar(value=True)
+        self._p2p_auto_log = tk.BooleanVar(value=False)
         self._p2p_auto_paper = tk.BooleanVar(value=False)
         self._p2p_auto_hold_sell = tk.BooleanVar(value=True)
 
@@ -631,8 +783,8 @@ class Dashboard:
                    command=self._recalculate_p2p_routes).pack(side="left", padx=(0, 12), pady=(13, 0))
         tk.Checkbutton(
             controls,
-            text="Auto Paper",
-            variable=self._p2p_auto_paper,
+            text="Alert",
+            variable=self._p2p_auto_alert,
             bg="#0d1117",
             fg="#c9d1d9",
             selectcolor="#161b22",
@@ -642,7 +794,29 @@ class Dashboard:
         ).pack(side="left", pady=(13, 0))
         tk.Checkbutton(
             controls,
-            text="Auto Hold Sell",
+            text="Auto Log",
+            variable=self._p2p_auto_log,
+            bg="#0d1117",
+            fg="#c9d1d9",
+            selectcolor="#161b22",
+            activebackground="#0d1117",
+            activeforeground="#58a6ff",
+            font=("Consolas", 9),
+        ).pack(side="left", padx=(10, 0), pady=(13, 0))
+        tk.Checkbutton(
+            controls,
+            text="Paper Fill",
+            variable=self._p2p_auto_paper,
+            bg="#0d1117",
+            fg="#c9d1d9",
+            selectcolor="#161b22",
+            activebackground="#0d1117",
+            activeforeground="#58a6ff",
+            font=("Consolas", 9),
+        ).pack(side="left", padx=(10, 0), pady=(13, 0))
+        tk.Checkbutton(
+            controls,
+            text="Hold Sell",
             variable=self._p2p_auto_hold_sell,
             bg="#0d1117",
             fg="#c9d1d9",
@@ -908,6 +1082,7 @@ class Dashboard:
                     )
                 )
 
+        self._run_p2p_live_assist(settings)
         if self._p2p_auto_paper.get():
             self._execute_p2p_paper_cycle(auto=True)
         if self._p2p_auto_hold_sell.get():
@@ -930,13 +1105,15 @@ class Dashboard:
             self._p2p_status_var.set("P2P settings error: min %, fee, and buffer cannot be negative")
             return None
 
-        return P2PRouteSettings(
+        settings = P2PRouteSettings(
             capital_php=capital_php,
             min_profit_php=-1_000_000_000.0,
             min_profit_pct=min_profit_pct,
             cross_exchange_transfer_fee_usdt=transfer_fee,
             local_buffer_php=buffer_php,
         )
+        self._p2p_settings_cache = settings
+        return settings
 
     def _fill_p2p_route_tree(self, routes: list[P2PRoute]):
         for item in self.p2p_route_tree.get_children():
@@ -974,6 +1151,77 @@ class Dashboard:
             return
         sweep = self._p2p_sweep
         self._p2p_sweep_profit_var.set(f"{sweep.profit_php:+,.0f} PHP")
+
+    def _run_p2p_live_assist(self, settings: P2PRouteSettings):
+        if not self._p2p_last_snapshot:
+            return
+        if getattr(self, "_p2p_auto_log", None) and self._p2p_auto_log.get():
+            self._auto_log_p2p_route(settings)
+        if getattr(self, "_p2p_auto_alert", None) and self._p2p_auto_alert.get():
+            self._maybe_send_p2p_assist_alert(settings)
+
+    def _auto_log_p2p_route(self, settings: P2PRouteSettings):
+        if not self._p2p_routes:
+            return
+        route = self._p2p_routes[0]
+        if route.profit_php <= 0 or route.profit_pct < settings.min_profit_pct:
+            return
+        key = (
+            f"{route.route_label}|{route.size_php:.0f}|"
+            f"{route.buy_ad.price:.2f}|{route.sell_ad.price:.2f}|{route.profit_php:.0f}"
+        )
+        if key == self._p2p_last_logged_route_key:
+            return
+        self._p2p_last_logged_route_key = key
+        self.p2p_journal.append(route, status="AUTO_WATCH", notes="live assist")
+        self._refresh_p2p_journal()
+
+    def _maybe_send_p2p_assist_alert(self, settings: P2PRouteSettings):
+        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+            return
+        key = ""
+        text = ""
+        if self._p2p_sweep and self._p2p_sweep.profit_php > 0 and self._p2p_sweep.profit_pct >= settings.min_profit_pct:
+            sweep = self._p2p_sweep
+            key = (
+                f"SWEEP|{sweep.size_php:.0f}|{sweep.avg_buy_price:.2f}|"
+                f"{sweep.avg_sell_price:.2f}|{sweep.profit_php:.0f}"
+            )
+            warnings = "; ".join(sweep.warnings) if sweep.warnings else "ok"
+            text = "\n".join([
+                f"Depth sweep: <b>{sweep.size_php:,.0f} PHP</b>",
+                f"Avg buy/sell: <b>{sweep.avg_buy_price:,.2f}</b> / <b>{sweep.avg_sell_price:,.2f}</b>",
+                f"Net: <b>{sweep.profit_php:+,.0f} PHP ({sweep.profit_pct:+.3f}%)</b> | Grade {sweep.grade}",
+                f"Warnings: {tg.escape_html(warnings)}",
+                "Manual fiat/payment/release confirmation required.",
+            ])
+        elif self._p2p_routes:
+            route = self._p2p_routes[0]
+            if route.profit_php <= 0 or route.profit_pct < settings.min_profit_pct:
+                return
+            key = (
+                f"ROUTE|{route.route_label}|{route.size_php:.0f}|"
+                f"{route.buy_ad.price:.2f}|{route.sell_ad.price:.2f}|{route.profit_php:.0f}"
+            )
+            warnings = "; ".join(route.warnings) if route.warnings else "ok"
+            text = "\n".join([
+                f"Route: <b>{tg.escape_html(route.route_label)}</b>",
+                f"Size: <b>{route.size_php:,.0f} PHP</b>",
+                f"Buy/sell: <b>{route.buy_ad.price:,.2f}</b> / <b>{route.sell_ad.price:,.2f}</b>",
+                f"Net: <b>{route.profit_php:+,.0f} PHP ({route.profit_pct:+.3f}%)</b> | Grade {route.grade}",
+                f"Warnings: {tg.escape_html(warnings)}",
+                "Manual fiat/payment/release confirmation required.",
+            ])
+        if not key:
+            return
+        now = time.time()
+        if key == self._p2p_last_alert_key:
+            return
+        if now - self._p2p_last_alert_ts < self.P2P_ALERT_COOLDOWN_SECS:
+            return
+        self._p2p_last_alert_key = key
+        self._p2p_last_alert_ts = now
+        tg.alert_p2p_signal(text)
 
     def _paper_cycle_now(self):
         if not self._p2p_last_snapshot:
@@ -1804,8 +2052,12 @@ class Dashboard:
     def _on_close(self):
         self._running = False
         self._force_event.set()
+        if self._telegram_commands:
+            self._telegram_commands.stop()
         self.root.destroy()
 
     def run(self):
         self.root.mainloop()
         self._running = False
+        if self._telegram_commands:
+            self._telegram_commands.stop()

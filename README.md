@@ -163,10 +163,13 @@ All settings live in `.env`. The Settings tab in the GUI lets you change most of
 2. Message @userinfobot → copy your ID
 3. Paste both into `.env` — alerts activate immediately on next restart
 
-**You'll receive alerts for:**
+**You'll receive alerts and dashboard controls for:**
 - Every trade opened (coin, entry price, margin, leverage)
 - Every trade closed (exit price, net P&L, portfolio value)
 - Daily summary at midnight UTC
+- `/dashboard` or the **Futures Dashboard** button for live portfolio figures
+- `/p2p` or the **P2P Arb** button for live USDT/PHP route and paper ledger figures
+- `/info` for the automation scope and manual P2P safety notes
 
 ---
 
@@ -214,11 +217,13 @@ The **P2P Arb** tab is a read-only USDT/PHP cycle command center. It pulls Binan
 | 500K Sweep | Simulates splitting a PHP amount across multiple real buy/sell listings with weighted average prices |
 | Paper Arb | Compounds a local paper PHP balance from profitable depth sweeps; stored in `data/p2p_paper_arb.json` |
 | Paper Hold | Buys paper USDT now, keeps one open inventory position, and auto-sells when the configured net profit threshold is reached |
+| Live Assist | Can alert Telegram, auto-log watchlist routes, paper-fill profitable sweeps, and paper-check hold exits |
 | Route Grade | A/B/C/WATCH/REVIEW label based on estimated return and counterparty filters |
 | Journal | Logs the top route to `data/p2p_cycle_journal.csv` for manual cycle tracking |
+| Transaction History | Records reset, capital adjustment, paper cycle, hold buy, and hold sell rows in `data/p2p_transaction_history.csv` |
 | Tables | Top buy/sell ads with PHP limits, USDT available, payment methods, advertiser, finish rate, and order count |
 
-The route and paper-hold estimates are informational only. The app does not place P2P orders and it does not verify fiat payment receipt. Manual fiat verification is required before releasing crypto or treating any cycle as complete.
+The route and paper-hold estimates are informational only. The app does not place P2P orders, send fiat, mark payment complete, verify fiat receipt, release crypto, or handle disputes. Manual fiat verification is required before releasing crypto or treating any real cycle as complete.
 
 ---
 

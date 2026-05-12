@@ -14,12 +14,16 @@ Setup:
 
 import logging
 import threading
+from collections.abc import Callable
+from html import escape
+from typing import Any
 
 import requests
 
 from bot import config
 
 logger = logging.getLogger(__name__)
+DashboardCallback = Callable[[], str]
 
 _EMOJI = {
     "tp_hit":    "✅",
@@ -33,26 +37,193 @@ _EMOJI = {
 }
 
 
-def _send(text: str) -> None:
+def escape_html(value: Any) -> str:
+    return escape(str(value), quote=False)
+
+
+def dashboard_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Futures Dashboard", "callback_data": "dashboard:futures"},
+                {"text": "P2P Arb", "callback_data": "dashboard:p2p"},
+            ],
+            [{"text": "Info", "callback_data": "dashboard:info"}],
+        ]
+    }
+
+
+def _api_url(method: str) -> str:
+    return f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/{method}"
+
+
+def _post_message(text: str, reply_markup: dict | None = None, chat_id: str | int | None = None) -> None:
+    target_chat = chat_id or config.TELEGRAM_CHAT_ID
+    if not config.TELEGRAM_BOT_TOKEN or not target_chat:
+        return
+    payload = {
+        "chat_id": target_chat,
+        "text": text,
+        "parse_mode": "HTML",
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    requests.post(_api_url("sendMessage"), json=payload, timeout=8)
+
+
+def _send(text: str, reply_markup: dict | None = None, chat_id: str | int | None = None) -> None:
     """Fire-and-forget Telegram message. Runs in a background thread."""
-    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+    if not config.TELEGRAM_BOT_TOKEN or not (chat_id or config.TELEGRAM_CHAT_ID):
         return
 
     def _post():
         try:
-            requests.post(
-                f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={
-                    "chat_id":    config.TELEGRAM_CHAT_ID,
-                    "text":       text,
-                    "parse_mode": "HTML",
-                },
-                timeout=8,
-            )
+            _post_message(text, reply_markup=reply_markup, chat_id=chat_id)
         except Exception as e:
             logger.debug("Telegram send failed: %s", e)
 
     threading.Thread(target=_post, daemon=True).start()
+
+
+def send_dashboard_menu(text: str | None = None) -> None:
+    _send(
+        text or "TradingBot23 dashboard controls are ready.",
+        reply_markup=dashboard_keyboard(),
+    )
+
+
+def alert_p2p_signal(text: str) -> None:
+    _send(
+        f"📣 <b>TradingBot23 P2P Assist</b>\n{text}",
+        reply_markup=dashboard_keyboard(),
+    )
+
+
+def default_info_text() -> str:
+    return (
+        "<b>TradingBot23 Telegram</b>\n"
+        "/dashboard - live futures paper dashboard\n"
+        "/p2p - live USDT/PHP P2P assist snapshot\n"
+        "/info - automation scope and safety notes\n\n"
+        "P2P live assist can scan, score, alert, log, and update paper ledger. "
+        "Fiat payment, payment-completed confirmation, and crypto release stay manual."
+    )
+
+
+class TelegramDashboardPoller:
+    """Small Telegram command listener for dashboard and P2P snapshots."""
+
+    def __init__(
+        self,
+        futures_callback: DashboardCallback,
+        p2p_callback: DashboardCallback,
+        info_callback: DashboardCallback | None = None,
+        poll_interval: float = 2.0,
+        session: requests.Session | None = None,
+    ):
+        self.futures_callback = futures_callback
+        self.p2p_callback = p2p_callback
+        self.info_callback = info_callback or default_info_text
+        self.poll_interval = poll_interval
+        self.session = session or requests.Session()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._offset: int | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID)
+
+    def start(self) -> None:
+        if not self.enabled or self._thread:
+            return
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1)
+
+    def _poll_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                params = {"timeout": 20}
+                if self._offset is not None:
+                    params["offset"] = self._offset
+                response = self.session.get(_api_url("getUpdates"), params=params, timeout=25)
+                response.raise_for_status()
+                body = response.json()
+                for update in body.get("result", []):
+                    update_id = update.get("update_id")
+                    if isinstance(update_id, int):
+                        self._offset = update_id + 1
+                    self._handle_update(update)
+            except Exception as exc:
+                logger.debug("Telegram dashboard poll failed: %s", exc)
+                self._stop.wait(self.poll_interval)
+
+    def _handle_update(self, update: dict) -> None:
+        if "callback_query" in update:
+            self._handle_callback(update["callback_query"])
+            return
+        message = update.get("message") or {}
+        text = str(message.get("text") or "").strip().lower()
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        if not self._chat_allowed(chat_id):
+            return
+        if text in {"/start", "/menu", "menu"}:
+            self._reply(chat_id, "TradingBot23 dashboard controls:", dashboard_keyboard())
+        elif text in {"/dashboard", "/status", "dashboard", "status"}:
+            self._reply(chat_id, self._safe_callback(self.futures_callback), dashboard_keyboard())
+        elif text in {"/p2p", "p2p"}:
+            self._reply(chat_id, self._safe_callback(self.p2p_callback), dashboard_keyboard())
+        elif text in {"/info", "info", "/help", "help"}:
+            self._reply(chat_id, self._safe_callback(self.info_callback), dashboard_keyboard())
+
+    def _handle_callback(self, query: dict) -> None:
+        message = query.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        if not self._chat_allowed(chat_id):
+            return
+        data = query.get("data")
+        if data == "dashboard:futures":
+            text = self._safe_callback(self.futures_callback)
+        elif data == "dashboard:p2p":
+            text = self._safe_callback(self.p2p_callback)
+        elif data == "dashboard:info":
+            text = self._safe_callback(self.info_callback)
+        else:
+            text = "Unknown dashboard action."
+        try:
+            callback_id = query.get("id")
+            if callback_id:
+                self.session.post(_api_url("answerCallbackQuery"), json={"callback_query_id": callback_id}, timeout=8)
+        except Exception as exc:
+            logger.debug("Telegram callback answer failed: %s", exc)
+        self._reply(chat_id, text, dashboard_keyboard())
+
+    def _reply(self, chat_id: int | str, text: str, reply_markup: dict | None = None) -> None:
+        try:
+            payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
+            self.session.post(_api_url("sendMessage"), json=payload, timeout=8)
+        except Exception as exc:
+            logger.debug("Telegram dashboard reply failed: %s", exc)
+
+    def _chat_allowed(self, chat_id: int | str | None) -> bool:
+        return chat_id is not None and str(chat_id) == str(config.TELEGRAM_CHAT_ID)
+
+    @staticmethod
+    def _safe_callback(callback: DashboardCallback) -> str:
+        try:
+            return callback()
+        except Exception as exc:
+            logger.exception("Telegram dashboard callback failed")
+            return f"⚠️ Dashboard data unavailable: {escape_html(exc)}"
 
 
 def alert_opened(symbol: str, entry_price: float, tp_price: float,
