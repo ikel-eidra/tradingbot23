@@ -357,11 +357,15 @@ class Dashboard:
                 pass
             return "⏸️ <b>TradingBot23 paused.</b>\nExisting paper positions remain in the local ledger."
         if action == "resume":
-            self._risk_kill_switch = False
             allowed, reasons = self._risk_allows_trading()
             if not allowed:
-                self._paused = True
+                self._paused = False
+                self._force_event.set()
                 self._record_decision("telegram", "resume", "BLOCK", 0, "; ".join(reasons))
+                try:
+                    self.root.after(0, lambda: self.pause_btn.config(text="Pause"))
+                except tk.TclError:
+                    pass
                 return "⛔ <b>Resume blocked by risk guard.</b>\n" + tg.escape_html("; ".join(reasons))
             self._paused = False
             self._force_event.set()
@@ -567,6 +571,8 @@ class Dashboard:
                    command=self._apply_risk_settings).pack(side="left", padx=(0, 6))
         ttk.Button(btns, text="Kill Switch", style="Btn.TButton",
                    command=self._risk_kill).pack(side="left", padx=(0, 6))
+        ttk.Button(btns, text="Clear Kill", style="Btn.TButton",
+                   command=self._risk_clear_kill).pack(side="left", padx=(0, 6))
         ttk.Button(btns, text="Resume If Allowed", style="Btn.TButton",
                    command=self._risk_resume).pack(side="left", padx=(0, 6))
         self._risk_action_var = tk.StringVar(value="")
@@ -1718,6 +1724,7 @@ class Dashboard:
         state, evaluation = self.p2p_paper.evaluate_hold_exit(
             [self._p2p_last_snapshot],
             settings=settings,
+            realism=self._p2p_realism_settings(),
             starting_php=settings.capital_php,
         )
         self._refresh_p2p_paper_summary(state)
@@ -2405,11 +2412,12 @@ class Dashboard:
 
     def _risk_kill(self):
         self._risk_kill_switch = True
-        self._paused = True
-        self.pause_btn.config(text="Resume")
-        self.status_var.set("Risk kill switch active. Futures entries are stopped.")
-        self._risk_action_var.set("Kill switch active.")
-        self._record_decision("risk", "kill_switch", "BLOCK", 0, "manual kill switch")
+        self._paused = False
+        self.pause_btn.config(text="Pause")
+        self._force_event.set()
+        self.status_var.set("Risk kill switch active. New entries are blocked; exits are still monitored.")
+        self._risk_action_var.set("Kill switch active. Monitoring exits only.")
+        self._record_decision("risk", "kill_switch", "BLOCK", 0, "manual kill switch; exits still monitored")
         try:
             append_event(
                 domain="system",
@@ -2426,12 +2434,18 @@ class Dashboard:
             pass
         self._refresh_risk_tab()
 
-    def _risk_resume(self):
+    def _risk_clear_kill(self):
         self._risk_kill_switch = False
+        self._risk_action_var.set("Kill switch cleared. Press Resume If Allowed if futures are paused.")
+        self._record_decision("risk", "kill_switch", "UPDATED", 80, "manual kill switch cleared")
+        self._refresh_risk_tab()
+
+    def _risk_resume(self):
         allowed, reasons = self._risk_allows_trading()
         if not allowed:
-            self._paused = True
-            self.pause_btn.config(text="Resume")
+            self._paused = False
+            self.pause_btn.config(text="Pause")
+            self._force_event.set()
             self._risk_action_var.set("Blocked: " + "; ".join(reasons))
             self._record_decision("risk", "resume", "BLOCK", 0, "; ".join(reasons))
             self._refresh_risk_tab()
@@ -2668,6 +2682,9 @@ class Dashboard:
         if self._paused:
             allowed, reasons = self._risk_allows_trading()
             if not allowed:
+                self._paused = False
+                self.pause_btn.config(text="Pause")
+                self._force_event.set()
                 self.status_var.set("Resume blocked by risk guard: " + "; ".join(reasons))
                 self._record_decision("risk", "resume", "BLOCK", 0, "; ".join(reasons))
                 return

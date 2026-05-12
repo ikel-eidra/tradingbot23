@@ -33,7 +33,8 @@ MAINTENANCE_MARGIN_RATE = 0.005
 _CSV_HEADER = [
     "open_time", "close_time", "symbol", "engine",
     "entry_price", "exit_price", "amount_usd", "notional", "leverage",
-    "pnl_pct", "pnl_usd", "funding_paid", "reason", "entry_change_24h",
+    "pnl_pct", "pnl_usd", "entry_fee", "exit_fee", "funding_paid",
+    "pnl_model", "reason", "entry_change_24h",
 ]
 
 
@@ -53,6 +54,63 @@ def _append_trade_csv(row: dict) -> None:
         if write_header:
             w.writeheader()
         w.writerow(row)
+
+
+def _migrate_trade_history_fee_model(path) -> None:
+    """Normalize legacy rows whose pnl_usd omitted entry fees."""
+    if not path.exists():
+        return
+    try:
+        with open(path, "r", newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+            old_fields = list(reader.fieldnames or [])
+    except Exception:
+        logger.debug("Could not inspect trade history for fee migration", exc_info=True)
+        return
+
+    if not rows:
+        return
+
+    changed = False
+    for row in rows:
+        if row.get("pnl_model") == "net_includes_entry_fee":
+            continue
+        try:
+            notional = float(row.get("notional", 0.0) or 0.0)
+            amount_usd = float(row.get("amount_usd", 0.0) or 0.0)
+            entry_price = float(row.get("entry_price", 0.0) or 0.0)
+            exit_price = float(row.get("exit_price", 0.0) or 0.0)
+            legacy_pnl = float(row.get("pnl_usd", 0.0) or 0.0)
+        except ValueError:
+            continue
+        entry_fee = notional * config.FUTURES_FEE_PCT
+        quantity = notional / entry_price if entry_price > 0 else 0.0
+        exit_fee = quantity * exit_price * config.FUTURES_FEE_PCT if exit_price > 0 else 0.0
+        net_pnl = legacy_pnl - entry_fee
+        row["entry_fee"] = f"{entry_fee:.8f}"
+        row["exit_fee"] = f"{exit_fee:.8f}"
+        row["pnl_usd"] = f"{net_pnl:.8f}"
+        row["pnl_pct"] = f"{(net_pnl / amount_usd * 100):.8f}" if amount_usd > 0 else row.get("pnl_pct", "0")
+        row["pnl_model"] = "net_includes_entry_fee"
+        changed = True
+
+    if not changed:
+        return
+
+    backup = path.with_suffix(".pre_fee_migration.csv")
+    try:
+        if not backup.exists():
+            backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        fieldnames = list(dict.fromkeys([*_CSV_HEADER, *old_fields]))
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({field: row.get(field, "") for field in fieldnames})
+        logger.info("Migrated trade history P&L to include entry fees: %s", path)
+    except Exception:
+        logger.exception("Failed to migrate trade history fee model")
 
 
 class FuturesPositionStatus(str, Enum):
@@ -459,15 +517,17 @@ class FuturesTrader:
         pos.funding_paid = funding_cost
 
         exit_notional = pos.quantity * exit_price
+        entry_fee = self._entry_fee_for(pos)
         exit_fee = exit_notional * config.FUTURES_FEE_PCT
 
         gross_pnl_usd = (exit_price - pos.entry_price) * pos.quantity
-        net_pnl_usd = gross_pnl_usd - exit_fee - funding_cost
+        cash_pnl_usd = gross_pnl_usd - exit_fee - funding_cost
+        net_pnl_usd = cash_pnl_usd - entry_fee
         pos.pnl_usd = net_pnl_usd
         pos.pnl_pct = (net_pnl_usd / pos.margin_used) * 100
 
         if reason == FuturesPositionStatus.LIQUIDATED:
-            self.cash_balance += pos.margin_used + net_pnl_usd
+            self.cash_balance += pos.margin_used + cash_pnl_usd
             if self.cash_balance < 0:
                 self.cash_balance = 0.0
             self._normalize_cash_balance()
@@ -489,13 +549,13 @@ class FuturesTrader:
                             pos.pnl_pct, pos.pnl_usd, reason.value, self.cash_balance)
             return
 
-        self.cash_balance += pos.margin_used + net_pnl_usd
+        self.cash_balance += pos.margin_used + cash_pnl_usd
         self._normalize_cash_balance()
         logger.info(
             "[PAPER-FUT] CLOSE %s @ $%.4f | %s | NET PNL: %+.2f%% (%+.2f USD) | "
-            "Fee $%.2f | Funding $%.2f | Cash: $%.2f",
+            "Entry fee $%.2f | Exit fee $%.2f | Funding $%.2f | Cash: $%.2f",
             pos.symbol, exit_price, reason.value, pos.pnl_pct, net_pnl_usd,
-            exit_fee, funding_cost, self.cash_balance,
+            entry_fee, exit_fee, funding_cost, self.cash_balance,
         )
         self._save_trade(pos)
         self._append_event(
@@ -524,7 +584,14 @@ class FuturesTrader:
                 "leverage":        pos.leverage,
                 "pnl_pct":         round(pos.pnl_pct, 4),
                 "pnl_usd":         round(pos.pnl_usd, 4),
+                "entry_fee":       round(self._entry_fee_for(pos), 8),
+                "exit_fee":        round(
+                    (pos.quantity * pos.exit_price * config.FUTURES_FEE_PCT)
+                    if pos.exit_price else 0.0,
+                    8,
+                ),
                 "funding_paid":    round(pos.funding_paid, 4),
+                "pnl_model":       "net_includes_entry_fee",
                 "reason":          pos.status.value,
                 "entry_change_24h": round(pos.entry_change_24h, 4),
             })
@@ -536,6 +603,7 @@ class FuturesTrader:
         if not path.exists():
             self.cash_balance = accounting.total_contributed_capital()
             return
+        _migrate_trade_history_fee_model(path)
         loaded = 0
         with open(path, "r", encoding="utf-8") as f:
             for row in csv.DictReader(f):

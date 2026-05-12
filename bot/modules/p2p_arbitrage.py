@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,19 @@ from typing import Iterable
 from bot import config
 from bot.modules.event_ledger import EventLedger
 from bot.modules.p2p_monitor import P2PAd, P2PSnapshot
+
+_LOCKS_GUARD = threading.Lock()
+_FILE_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _file_lock(path: Path) -> threading.RLock:
+    key = str(path.resolve())
+    with _LOCKS_GUARD:
+        lock = _FILE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _FILE_LOCKS[key] = lock
+        return lock
 
 
 @dataclass(frozen=True)
@@ -241,17 +255,20 @@ class P2PPaperArb:
                 else config.DATA_DIR / "event_ledger.csv"
             )
         )
+        self._state_lock = _file_lock(self.path)
+        self._transaction_lock = _file_lock(self.transaction_path)
 
     def state(self, starting_php: float = 500_000.0) -> dict:
-        if self.path.exists():
-            try:
-                return self._normalize_state(
-                    json.loads(self.path.read_text(encoding="utf-8")),
-                    starting_php,
-                )
-            except json.JSONDecodeError:
-                pass
-        return self.reset(starting_php)
+        with self._state_lock:
+            if self.path.exists():
+                try:
+                    return self._normalize_state(
+                        json.loads(self.path.read_text(encoding="utf-8")),
+                        starting_php,
+                    )
+                except json.JSONDecodeError:
+                    pass
+            return self.reset(starting_php)
 
     def reset(self, starting_php: float = 500_000.0) -> dict:
         now = datetime.now(timezone.utc).isoformat()
@@ -424,6 +441,7 @@ class P2PPaperArb:
         self,
         snapshots: Iterable[P2PSnapshot],
         settings: P2PRouteSettings | None = None,
+        realism: P2PRealismSettings | None = None,
         starting_php: float = 500_000.0,
     ) -> tuple[dict, P2PHoldEvaluation | None]:
         """Mark an open hold and close it when the target profit is reached."""
@@ -436,6 +454,8 @@ class P2PPaperArb:
         evaluation = build_p2p_hold_exit(position, snapshots, settings)
         if evaluation is None:
             return state, None
+        if realism is not None:
+            evaluation = apply_realism_to_hold_evaluation(evaluation, realism)
 
         position["last_checked_at"] = evaluation.timestamp
         position["last_avg_sell_price"] = evaluation.avg_sell_price
@@ -550,8 +570,11 @@ class P2PPaperArb:
         return state
 
     def _save(self, state: dict) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        with self._state_lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+            tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+            tmp.replace(self.path)
 
     def _append_transaction(
         self,
@@ -593,16 +616,17 @@ class P2PPaperArb:
         self._append_event_ledger(row)
 
     def _append_transaction_csv(self, row: dict) -> None:
-        self.transaction_path.parent.mkdir(parents=True, exist_ok=True)
-        write_header = not self.transaction_path.exists()
-        with open(self.transaction_path, "a", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=self.TRANSACTION_FIELDS)
-            if write_header:
-                writer.writeheader()
-            writer.writerow({
-                field: row.get(field, "")
-                for field in self.TRANSACTION_FIELDS
-            })
+        with self._transaction_lock:
+            self.transaction_path.parent.mkdir(parents=True, exist_ok=True)
+            write_header = not self.transaction_path.exists()
+            with open(self.transaction_path, "a", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=self.TRANSACTION_FIELDS)
+                if write_header:
+                    writer.writeheader()
+                writer.writerow({
+                    field: row.get(field, "")
+                    for field in self.TRANSACTION_FIELDS
+                })
 
     def _append_event_ledger(self, row: dict) -> None:
         try:
@@ -752,13 +776,16 @@ def build_depth_sweep(
     if spent_php <= 0 or buy_usdt <= 0:
         return None
 
+    buy_marketplaces = {lot.marketplace for lot in buy_lots}
+    sell_lots, sold_usdt, sold_php = _sweep_sell_side(sell_ads, buy_usdt)
+    sell_marketplaces = {lot.marketplace for lot in sell_lots}
     fee_usdt = 0.0
-    marketplaces = {lot.marketplace for lot in buy_lots}
-    if len(marketplaces) > 1:
+    if sell_marketplaces and (buy_marketplaces != sell_marketplaces or len(buy_marketplaces) > 1):
         fee_usdt = settings.cross_exchange_transfer_fee_usdt
-
-    sell_target_usdt = max(0.0, buy_usdt - fee_usdt)
-    sell_lots, sold_usdt, sold_php = _sweep_sell_side(sell_ads, sell_target_usdt)
+        sell_lots, sold_usdt, sold_php = _sweep_sell_side(
+            sell_ads,
+            max(0.0, buy_usdt - fee_usdt),
+        )
     avg_buy = spent_php / buy_usdt if buy_usdt > 0 else 0.0
     avg_sell = sold_php / sold_usdt if sold_usdt > 0 else 0.0
     profit_php = sold_php - spent_php - settings.local_buffer_php
@@ -833,6 +860,54 @@ def apply_realism_to_sweep(
         warnings=tuple(warnings),
         buy_lots=sweep.buy_lots,
         sell_lots=sweep.sell_lots,
+    )
+
+
+def apply_realism_to_hold_evaluation(
+    evaluation: P2PHoldEvaluation,
+    realism: P2PRealismSettings | None = None,
+) -> P2PHoldEvaluation:
+    """Apply paper settlement buffers to a buy-hold sell evaluation."""
+
+    realism = realism or P2PRealismSettings()
+    delay_mins = max(0.0, float(realism.settlement_delay_mins))
+    cancel_rate = max(0.0, float(realism.cancel_rate_pct))
+    spread_decay = max(0.0, float(realism.spread_decay_pct))
+    spread_decay_php = evaluation.cost_php * (spread_decay / 100)
+    cancel_drag_php = evaluation.cost_php * (cancel_rate / 100) * 0.0005
+    delay_drag_php = evaluation.cost_php * min(delay_mins / 1440, 1.0) * 0.0002
+    total_drag_php = spread_decay_php + cancel_drag_php + delay_drag_php
+
+    adjusted_sell_php = max(0.0, evaluation.sell_php - total_drag_php)
+    profit_php = evaluation.profit_php - total_drag_php
+    profit_pct = profit_php / evaluation.cost_php * 100 if evaluation.cost_php > 0 else 0.0
+    warnings = list(evaluation.warnings)
+    if total_drag_php > 0:
+        warnings.append(f"realism drag {total_drag_php:.0f} PHP")
+    if delay_mins > 0:
+        warnings.append(f"settlement {delay_mins:.0f}m")
+    if cancel_rate > 0:
+        warnings.append(f"cancel risk {cancel_rate:.1f}%")
+    exit_ready = (
+        evaluation.sold_usdt >= evaluation.usdt * 0.99
+        and profit_pct >= evaluation.target_profit_pct
+    )
+    avg_sell = adjusted_sell_php / evaluation.sold_usdt if evaluation.sold_usdt > 0 else 0.0
+
+    return P2PHoldEvaluation(
+        timestamp=evaluation.timestamp,
+        cost_php=evaluation.cost_php,
+        usdt=evaluation.usdt,
+        sold_usdt=evaluation.sold_usdt,
+        sell_php=adjusted_sell_php,
+        avg_buy_price=evaluation.avg_buy_price,
+        avg_sell_price=avg_sell,
+        profit_php=profit_php,
+        profit_pct=profit_pct,
+        target_profit_pct=evaluation.target_profit_pct,
+        exit_ready=exit_ready,
+        warnings=tuple(warnings),
+        sell_lots=evaluation.sell_lots,
     )
 
 

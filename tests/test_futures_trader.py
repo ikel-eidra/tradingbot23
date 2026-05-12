@@ -168,6 +168,22 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertEqual(closed[0].status, FuturesPositionStatus.TP_HIT)
         self.assertGreater(closed[0].pnl_pct, 0)
 
+    def test_closed_pnl_includes_entry_and_exit_fees(self):
+        config.FUNDING_RATE_DAILY = 0
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            pos = self.trader.open_position("ETH", margin_usd=1000)
+        close_price = pos.tp_price
+        gross = (close_price - pos.entry_price) * pos.quantity
+        entry_fee = pos.notional * config.FUTURES_FEE_PCT
+        exit_fee = (pos.quantity * close_price) * config.FUTURES_FEE_PCT
+        expected_pnl = gross - entry_fee - exit_fee
+
+        with patch.object(self.trader, "get_current_price", return_value=close_price):
+            closed = self.trader.check_positions()
+
+        self.assertAlmostEqual(closed[0].pnl_usd, expected_pnl, places=4)
+        self.assertAlmostEqual(self.trader.cash_balance, config.CAPITAL_USD + expected_pnl, places=4)
+
     def test_sl_hit_yields_negative_pnl(self):
         with patch.object(self.trader, "get_current_price", return_value=100.0):
             pos = self.trader.open_position("ETH", margin_usd=1000)

@@ -10,6 +10,7 @@ from bot.modules.p2p_arbitrage import (
     P2PPaperArb,
     P2PRealismSettings,
     P2PRouteSettings,
+    apply_realism_to_hold_evaluation,
     apply_realism_to_sweep,
     build_depth_sweep,
     build_p2p_routes,
@@ -97,6 +98,39 @@ class TestP2PArbitrage(unittest.TestCase):
         self.assertAlmostEqual(route.buy_usdt, 1_000)
         self.assertAlmostEqual(route.sell_usdt, 999)
         self.assertAlmostEqual(route.profit_php, 539.4)
+
+    def test_depth_sweep_applies_cross_exchange_transfer_fee(self):
+        buy_snapshot = P2PSnapshot(
+            marketplace="Binance",
+            asset="USDT",
+            fiat="PHP",
+            buy_ads=[p2p_ad("BUY", "Binance", 60.00, 1_000, 100_000, 5_000, "seller")],
+            sell_ads=[],
+            as_of=None,
+        )
+        sell_snapshot = P2PSnapshot(
+            marketplace="OKX",
+            asset="USDT",
+            fiat="PHP",
+            buy_ads=[],
+            sell_ads=[p2p_ad("SELL", "OKX", 60.60, 1_000, 100_000, 5_000, "buyer")],
+            as_of=None,
+        )
+
+        sweep = build_depth_sweep(
+            [buy_snapshot, sell_snapshot],
+            P2PRouteSettings(
+                capital_php=60_000,
+                min_profit_pct=0.1,
+                cross_exchange_transfer_fee_usdt=1,
+            ),
+        )
+
+        self.assertIsNotNone(sweep)
+        self.assertEqual(sweep.transfer_fee_usdt, 1)
+        self.assertAlmostEqual(sweep.buy_usdt, 1_000)
+        self.assertAlmostEqual(sweep.sell_usdt, 999)
+        self.assertAlmostEqual(sweep.profit_php, 539.4)
 
     def test_journal_appends_and_reads_recent_routes(self):
         snapshot = P2PSnapshot(
@@ -298,6 +332,45 @@ class TestP2PArbitrage(unittest.TestCase):
         self.assertEqual(len(reloaded["hold_trades"]), 1)
         self.assertIn("HOLD_BUY", [row["type"] for row in reloaded["transactions"]])
         self.assertEqual(reloaded["transactions"][-1]["type"], "HOLD_SELL")
+
+    def test_realism_buffer_can_hold_back_buy_hold_exit(self):
+        buy_snapshot = P2PSnapshot(
+            marketplace="Binance",
+            asset="USDT",
+            fiat="PHP",
+            buy_ads=[p2p_ad("BUY", "Binance", 60.00, 1_000, 100_000, 5_000, "seller")],
+            sell_ads=[],
+            as_of=None,
+        )
+        sell_snapshot = P2PSnapshot(
+            marketplace="Binance",
+            asset="USDT",
+            fiat="PHP",
+            buy_ads=[],
+            sell_ads=[p2p_ad("SELL", "Binance", 60.20, 1_000, 100_000, 5_000, "buyer")],
+            as_of=None,
+        )
+        entry = build_p2p_hold_entry(
+            [buy_snapshot],
+            P2PRouteSettings(capital_php=50_000, min_profit_pct=0.2),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paper = P2PPaperArb(path=Path(tmpdir) / "paper.json")
+            paper.open_hold(entry, target_profit_pct=0.2, starting_php=100_000)
+            _, raw_evaluation = paper.evaluate_hold_exit(
+                [sell_snapshot],
+                P2PRouteSettings(capital_php=50_000, min_profit_pct=0.2),
+                starting_php=100_000,
+            )
+            adjusted = apply_realism_to_hold_evaluation(
+                raw_evaluation,
+                P2PRealismSettings(spread_decay_pct=0.20, cancel_rate_pct=0, settlement_delay_mins=0),
+            )
+
+        self.assertTrue(raw_evaluation.exit_ready)
+        self.assertFalse(adjusted.exit_ready)
+        self.assertLess(adjusted.profit_php, raw_evaluation.profit_php)
 
     def test_legacy_paper_state_gets_transaction_history(self):
         legacy = {
