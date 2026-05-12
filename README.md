@@ -233,6 +233,8 @@ The route and paper-hold estimates are informational only. The app does not plac
 | Paper Sim (Live Data) | Paper Buy Hold | Simulates buying USDT from current live seller ads. Paper cash goes down, hold USDT appears, and the app waits for a later sell-side quote. |
 | Paper Sim (Live Data) | Check/Sell Hold | Marks the open paper hold against current live buyer prices. It closes only when the configured net profit threshold is reached. |
 | Paper Sim (Live Data) | TG Alerts | Sends paper buy/sell/hold events to Telegram when enabled. |
+| Paper Sim (Live Data) | Recalculate Only | Refreshes route math only. It never records a paper transaction. |
+| Paper Sim (Live Data) | Auto Cycle | Runs only after fresh P2P listing refreshes and skips repeated fills when the listing set is unchanged. |
 | Live Assist | Send Live Snapshot | Sends the current P2P dashboard to Telegram. No balances change. |
 | Live Assist | Log Watch Route | Saves the current top route to `data/p2p_cycle_journal.csv`. No balances change. |
 

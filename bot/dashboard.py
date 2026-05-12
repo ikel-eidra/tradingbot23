@@ -65,6 +65,7 @@ class Dashboard:
         self._p2p_last_alert_key = ""
         self._p2p_last_alert_ts = 0.0
         self._p2p_last_logged_route_key = ""
+        self._p2p_last_auto_cycle_key = ""
         self._telegram_commands = None
 
         # Equity history: list of (datetime, portfolio_value)
@@ -791,7 +792,7 @@ class Dashboard:
                 font=("Consolas", 9),
             ).pack(side="left", padx=(0, 8))
 
-        ttk.Button(controls, text="Recalculate", style="Btn.TButton",
+        ttk.Button(controls, text="Recalculate Only", style="Btn.TButton",
                    command=self._recalculate_p2p_routes).pack(side="left", padx=(0, 12), pady=(13, 0))
 
         action_bar = tk.Frame(body, bg="#0d1117")
@@ -1151,9 +1152,9 @@ class Dashboard:
             f"USDT/PHP updated {snapshot.as_of.strftime('%H:%M:%S')} UTC  |  "
             "Routes are estimates only; manual fiat verification is still required."
         )
-        self._recalculate_p2p_routes(update_status=False)
+        self._recalculate_p2p_routes(update_status=False, run_automation=True)
 
-    def _recalculate_p2p_routes(self, update_status: bool = True):
+    def _recalculate_p2p_routes(self, update_status: bool = True, run_automation: bool = False):
         settings = self._p2p_route_settings()
         if not settings:
             return
@@ -1186,7 +1187,7 @@ class Dashboard:
                     self._p2p_capital_status(
                         capital_delta,
                         f"Recalculated {len(self._p2p_routes)} route(s) for "
-                        f"{settings.capital_php:,.0f} PHP capital.",
+                        f"{settings.capital_php:,.0f} PHP capital. No paper transaction was recorded.",
                     )
                 )
         else:
@@ -1196,9 +1197,12 @@ class Dashboard:
                 self._p2p_status_var.set(
                     self._p2p_capital_status(
                         capital_delta,
-                        "No route meets the current profit filters.",
+                        "No route meets the current profit filters. No paper transaction was recorded.",
                     )
                 )
+
+        if not run_automation:
+            return
 
         if self._p2p_current_mode() == "live":
             self._run_p2p_live_assist(settings)
@@ -1518,6 +1522,10 @@ class Dashboard:
         if not paper_sweep:
             self._p2p_status_var.set("Paper cycle skipped: not enough depth.")
             return
+        if auto:
+            auto_key = self._p2p_sweep_listing_key(paper_sweep)
+            if auto_key == self._p2p_last_auto_cycle_key:
+                return
         state, cycle = self.p2p_paper.execute_if_profitable(
             paper_sweep,
             min_profit_pct=settings.min_profit_pct,
@@ -1530,6 +1538,8 @@ class Dashboard:
                 f"{source} cycle: {cycle.profit_php:+,.0f} PHP | "
                 f"Balance {cycle.balance_after_php:,.0f} PHP"
             )
+            if auto:
+                self._p2p_last_auto_cycle_key = auto_key
             warnings = "; ".join(cycle.warnings) if cycle.warnings else "ok"
             self._send_p2p_paper_event(
                 "Paper Buy+Sell Filled",
@@ -1543,6 +1553,20 @@ class Dashboard:
             )
         elif not auto:
             self._p2p_status_var.set("Paper cycle skipped: sweep is below profit filter.")
+
+    @staticmethod
+    def _p2p_sweep_listing_key(sweep: P2PDepthSweep) -> str:
+        def lot_key(lot):
+            return (
+                lot.side,
+                lot.marketplace,
+                lot.advertiser,
+                f"{lot.price:.4f}",
+            )
+
+        buy_key = tuple(lot_key(lot) for lot in sweep.buy_lots)
+        sell_key = tuple(lot_key(lot) for lot in sweep.sell_lots)
+        return repr((buy_key, sell_key, f"{sweep.avg_buy_price:.4f}", f"{sweep.avg_sell_price:.4f}"))
 
     def _reset_p2p_paper(self):
         try:
