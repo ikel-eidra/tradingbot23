@@ -15,6 +15,7 @@ Modeled futures mechanics:
 import csv
 import json
 import logging
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -37,6 +38,14 @@ _CSV_HEADER = [
     "pnl_model", "reason", "entry_change_24h",
 ]
 
+_RESET_SESSION_HEADER = [
+    "reset_time", "session_id", "archive_dir",
+    "starting_capital_usd", "cash_balance",
+    "archived_closed_trades", "archived_open_positions",
+    "archived_realized_pnl_usd", "archived_open_margin_usd",
+    "reason",
+]
+
 
 def _history_csv():
     return config.DATA_DIR / "trade_history.csv"
@@ -44,6 +53,10 @@ def _history_csv():
 
 def _open_positions_json():
     return config.DATA_DIR / "open_positions.json"
+
+
+def _reset_sessions_csv():
+    return config.DATA_DIR / "futures_reset_sessions.csv"
 
 
 def _append_trade_csv(row: dict) -> None:
@@ -54,6 +67,26 @@ def _append_trade_csv(row: dict) -> None:
         if write_header:
             w.writeheader()
         w.writerow(row)
+
+
+def _append_reset_session(row: dict) -> None:
+    path = _reset_sessions_csv()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists()
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=_RESET_SESSION_HEADER)
+        if write_header:
+            w.writeheader()
+        w.writerow({field: row.get(field, "") for field in _RESET_SESSION_HEADER})
+
+
+def recent_reset_sessions(limit: int = 10) -> list[dict]:
+    path = _reset_sessions_csv()
+    if not path.exists():
+        return []
+    with open(path, "r", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    return rows[-limit:]
 
 
 def _migrate_trade_history_fee_model(path) -> None:
@@ -715,6 +748,80 @@ class FuturesTrader:
         self.refresh_cross_liquidation_prices()
         self._save_open_positions()
         return delta
+
+    def reset_paper_account(self, reason: str = "manual_reset") -> dict:
+        """Archive the current futures paper session and start a fresh one.
+
+        Current futures history/open positions are moved out of the active
+        session by archiving the files, then clearing in-memory positions. P2P
+        state and the monthly contribution ledger are intentionally left alone.
+        """
+        now = datetime.now(timezone.utc)
+        session_id = f"reset_{now.strftime('%Y%m%d_%H%M%S')}"
+        archive_dir = config.DATA_DIR / "futures_sessions" / session_id
+        suffix = 1
+        while archive_dir.exists():
+            archive_dir = config.DATA_DIR / "futures_sessions" / f"{session_id}_{suffix}"
+            suffix += 1
+        archive_dir.mkdir(parents=True, exist_ok=False)
+
+        closed_positions = self.get_trade_history()
+        open_positions = self.get_open_positions()
+        archived_realized_pnl = sum(p.pnl_usd for p in closed_positions)
+        archived_open_margin = sum(p.margin_used for p in open_positions)
+
+        for path in (
+            _history_csv(),
+            _open_positions_json(),
+            config.DATA_DIR / "account_state.json",
+        ):
+            if path.exists():
+                shutil.copy2(path, archive_dir / path.name)
+
+        history_path = _history_csv()
+        if history_path.exists():
+            history_path.unlink()
+
+        self.positions = []
+        self.account_capital_usd = config.CAPITAL_USD
+        self.cash_balance = accounting.total_contributed_capital()
+        self._normalize_cash_balance()
+        self._save_open_positions()
+
+        summary = {
+            "reset_time": now.isoformat(),
+            "session_id": archive_dir.name,
+            "archive_dir": str(archive_dir),
+            "starting_capital_usd": config.CAPITAL_USD,
+            "cash_balance": self.cash_balance,
+            "archived_closed_trades": len(closed_positions),
+            "archived_open_positions": len(open_positions),
+            "archived_realized_pnl_usd": archived_realized_pnl,
+            "archived_open_margin_usd": archived_open_margin,
+            "reason": reason,
+        }
+        _append_reset_session(summary)
+
+        self._append_event(
+            event_type="RESET",
+            status="APPLIED",
+            amount=self.cash_balance,
+            pnl=0.0,
+            balance=self.cash_balance,
+            symbol_or_route="FUTURES",
+            details=(
+                f"archived {len(closed_positions)} closed and "
+                f"{len(open_positions)} open to {archive_dir.name}"
+            ),
+        )
+        logger.warning(
+            "Futures paper reset | Archived %d closed / %d open to %s | New cash: $%.2f",
+            len(closed_positions),
+            len(open_positions),
+            archive_dir,
+            self.cash_balance,
+        )
+        return summary
 
     def arm_crash_sl(self) -> int:
         """Set emergency SL on all open positions at current_price × (1 - CRASH_SL_PCT).

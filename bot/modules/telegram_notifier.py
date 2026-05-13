@@ -156,6 +156,7 @@ class TelegramDashboardPoller:
     def start(self) -> None:
         if not self.enabled or self._thread:
             return
+        self._prime_offset()
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
 
@@ -163,6 +164,18 @@ class TelegramDashboardPoller:
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1)
+
+    def _prime_offset(self) -> None:
+        """Skip queued old Telegram commands when the desktop app starts."""
+        try:
+            response = self.session.get(_api_url("getUpdates"), params={"timeout": 0}, timeout=8)
+            response.raise_for_status()
+            updates = response.json().get("result", [])
+            update_ids = [u.get("update_id") for u in updates if isinstance(u.get("update_id"), int)]
+            if update_ids:
+                self._offset = max(update_ids) + 1
+        except Exception as exc:
+            logger.debug("Telegram dashboard offset prime failed: %s", exc)
 
     def _poll_loop(self) -> None:
         while not self._stop.is_set():

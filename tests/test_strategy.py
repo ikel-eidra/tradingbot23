@@ -19,6 +19,7 @@ class TestStrategy(unittest.TestCase):
         config.LEVERAGE = 1
         config.FUTURES_FEE_PCT = 0.0006
         config.MONTHLY_CONTRIBUTION_USD = 0
+        config.TOP_N_COINS = 50
         config.TOP_N_LOSERS = 5
 
     def test_execute_signals_respects_max_open_slots(self):
@@ -39,12 +40,73 @@ class TestStrategy(unittest.TestCase):
         trader = FakeTrader()
         strategy = Strategy(trader=trader)
         opened = strategy.execute_signals([
-            {"symbol": "AAA", "current_price": 1.0, "change_24h": -3.0},
-            {"symbol": "BBB", "current_price": 1.0, "change_24h": -4.0},
+            {"symbol": "AAA", "cmc_rank": 10, "current_price": 1.0, "change_24h": -3.0},
+            {"symbol": "BBB", "cmc_rank": 11, "current_price": 1.0, "change_24h": -4.0},
         ])
 
         self.assertEqual(len(opened), 1)
         self.assertEqual(len(trader.get_open_positions()), config.TOP_N_LOSERS)
+
+    def test_execute_signals_skips_outside_top_50(self):
+        """Signals without a valid top-50 rank should never open positions."""
+
+        class FakeTrader:
+            def __init__(self):
+                self.positions = []
+
+            def get_open_positions(self):
+                return list(self.positions)
+
+            def open_position(self, symbol, entry_price=None, entry_change_24h=0.0):
+                pos = SimpleNamespace(symbol=symbol)
+                self.positions.append(pos)
+                return pos
+
+        trader = FakeTrader()
+        strategy = Strategy(trader=trader)
+        opened = strategy.execute_signals([
+            {"symbol": "RANK51", "cmc_rank": 51, "current_price": 1.0, "change_24h": -5.0},
+            {"symbol": "NORANK", "current_price": 1.0, "change_24h": -5.0},
+        ])
+
+        self.assertEqual(opened, [])
+        self.assertEqual(trader.get_open_positions(), [])
+
+    def test_fill_empty_slots_skips_stale_outside_top_50_basket_entries(self):
+        """Stale basket rows outside top 50 should not refill empty slots."""
+
+        class FakeFetcher:
+            def get_top_coins(self):
+                return [
+                    {"symbol": "GOOD", "cmc_rank": 12, "price": 2.0, "percent_change_24h": -4.0},
+                    {"symbol": "STALE", "cmc_rank": 51, "price": 1.0, "percent_change_24h": -9.0},
+                ]
+
+        class FakeTrader:
+            cash_balance = 1000
+
+            def __init__(self):
+                self.positions = []
+
+            def get_open_positions(self):
+                return list(self.positions)
+
+            def open_position(self, symbol, entry_price=None, entry_change_24h=0.0):
+                pos = SimpleNamespace(symbol=symbol)
+                self.positions.append(pos)
+                return pos
+
+        trader = FakeTrader()
+        strategy = Strategy(fetcher=FakeFetcher(), trader=trader)
+        strategy.basket = [
+            {"symbol": "GOOD", "cmc_rank": 12},
+            {"symbol": "STALE", "cmc_rank": 51},
+        ]
+
+        opened = strategy.fill_empty_slots()
+
+        self.assertEqual([p.symbol for p in opened], ["GOOD"])
+        self.assertEqual([p.symbol for p in trader.get_open_positions()], ["GOOD"])
 
     def test_should_refresh_basket_when_empty(self):
         """Should refresh when basket is empty."""

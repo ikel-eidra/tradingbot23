@@ -31,6 +31,30 @@ class Strategy:
         self.basket_year: int | None = None
         self._crash_mode: bool = False
 
+    def _rank(self, coin: dict) -> int | None:
+        """Return the market-cap rank we use for the top-N guard."""
+        rank = coin.get("cmc_rank") or coin.get("market_cap_rank")
+        try:
+            return int(rank)
+        except (TypeError, ValueError):
+            return None
+
+    def _is_top_ranked_coin(self, coin: dict) -> bool:
+        rank = self._rank(coin)
+        return rank is not None and 1 <= rank <= config.TOP_N_COINS
+
+    def _filter_top_ranked(self, coins: list[dict], context: str) -> list[dict]:
+        eligible = [c for c in coins if self._is_top_ranked_coin(c)]
+        skipped = [c.get("symbol", "?") for c in coins if not self._is_top_ranked_coin(c)]
+        if skipped:
+            logger.warning(
+                "%s skipped outside configured top %d: %s",
+                context,
+                config.TOP_N_COINS,
+                skipped,
+            )
+        return eligible
+
     def should_refresh_basket(self, now: datetime | None = None) -> bool:
         """Check if we need a new monthly snapshot."""
         now = now or datetime.now(timezone.utc)
@@ -49,7 +73,7 @@ class Strategy:
         now = now or datetime.now(timezone.utc)
 
         logger.info("Taking monthly snapshot for %s %d", now.strftime("%B"), now.year)
-        coins = self.fetcher.get_top_coins()
+        coins = self._filter_top_ranked(self.fetcher.get_top_coins(), "Monthly universe")
         losers = self.fetcher.get_top_losers(coins)
 
         if not losers:
@@ -73,6 +97,10 @@ class Strategy:
         """Load a previously saved basket from disk."""
         coins = self.fetcher.load_snapshot(year, month)
         if coins:
+            coins = self._filter_top_ranked(coins, "Loaded basket")
+            if not coins:
+                logger.warning("Loaded basket had no coins inside configured top %d", config.TOP_N_COINS)
+                return None
             self.basket = coins
             self.basket_month = month
             self.basket_year = year
@@ -100,15 +128,27 @@ class Strategy:
         dipping = []
         for coin in self.basket:
             symbol = coin["symbol"]
-            if symbol not in fresh_data:
+            fresh_coin = fresh_data.get(symbol)
+            if not self._is_top_ranked_coin(coin):
+                logger.debug("Skipping %s — basket rank is outside top %d", symbol, config.TOP_N_COINS)
+                continue
+            if not fresh_coin:
                 logger.debug("No fresh data for %s, skipping", symbol)
                 continue
+            if not self._is_top_ranked_coin(fresh_coin):
+                logger.debug("Skipping %s — fresh rank is outside top %d", symbol, config.TOP_N_COINS)
+                continue
 
-            change_24h    = fresh_data[symbol]["percent_change_24h"]
-            current_price = fresh_data[symbol]["price"]
+            change_24h    = fresh_coin["percent_change_24h"]
+            current_price = fresh_coin["price"]
 
             if change_24h <= threshold:
-                dipping.append({**coin, "current_price": current_price, "change_24h": change_24h})
+                dipping.append({
+                    **coin,
+                    "cmc_rank": fresh_coin.get("cmc_rank", coin.get("cmc_rank")),
+                    "current_price": current_price,
+                    "change_24h": change_24h,
+                })
                 logger.info("DIP detected: %s at $%.4f (24h: %+.2f%%)",
                             symbol, current_price, change_24h)
 
@@ -177,6 +217,14 @@ class Strategy:
         opened = []
         for coin in dipping_coins:
             symbol = coin["symbol"]
+            if not self._is_top_ranked_coin(coin):
+                logger.warning(
+                    "Skipping %s — rank %s is outside configured top %d",
+                    symbol,
+                    self._rank(coin),
+                    config.TOP_N_COINS,
+                )
+                continue
 
             open_positions = self.trader.get_open_positions()
             if len(open_positions) >= config.TOP_N_LOSERS:
@@ -224,12 +272,22 @@ class Strategy:
         candidates = []
         for coin in self.basket:
             sym = coin["symbol"]
-            if sym in open_symbols or sym not in fresh_data:
+            fresh_coin = fresh_data.get(sym)
+            if sym in open_symbols:
+                continue
+            if not self._is_top_ranked_coin(coin):
+                logger.debug("Skipping %s fill — basket rank is outside top %d", sym, config.TOP_N_COINS)
+                continue
+            if not fresh_coin:
+                continue
+            if not self._is_top_ranked_coin(fresh_coin):
+                logger.debug("Skipping %s fill — fresh rank is outside top %d", sym, config.TOP_N_COINS)
                 continue
             candidates.append({
                 **coin,
-                "current_price": fresh_data[sym]["price"],
-                "change_24h":    fresh_data[sym]["percent_change_24h"],
+                "cmc_rank": fresh_coin.get("cmc_rank", coin.get("cmc_rank")),
+                "current_price": fresh_coin["price"],
+                "change_24h":    fresh_coin["percent_change_24h"],
             })
 
         candidates.sort(key=lambda c: c["change_24h"])

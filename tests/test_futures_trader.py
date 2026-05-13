@@ -7,7 +7,13 @@ from unittest.mock import patch
 
 from bot import config
 from bot.modules import accounting
-from bot.modules.futures_trader import FuturesPositionStatus, FuturesTrader
+from bot.modules.futures_trader import (
+    _history_csv,
+    _open_positions_json,
+    FuturesPositionStatus,
+    FuturesTrader,
+    recent_reset_sessions,
+)
 from tests.support import isolate_data_dir
 
 
@@ -135,6 +141,42 @@ class TestFuturesTrader(unittest.TestCase):
 
         self.assertEqual(self.trader.apply_monthly_contribution(may_tenth), 100)
         self.assertAlmostEqual(self.trader.cash_balance, 10100)
+
+    def test_reset_paper_account_archives_and_starts_new_history(self):
+        config.MONTHLY_CONTRIBUTION_USD = 100
+        config.MONTHLY_CONTRIBUTION_DAY = 1
+        self.trader.apply_monthly_contribution(datetime(2026, 5, 1, tzinfo=timezone.utc))
+
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            closed_seed = self.trader.open_position("ETH", margin_usd=1000)
+        with patch.object(self.trader, "get_current_price", return_value=closed_seed.tp_price):
+            self.trader.check_positions()
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            self.trader.open_position("BTC", margin_usd=500)
+
+        self.assertTrue(_history_csv().exists())
+        self.assertEqual(len(self.trader.get_trade_history()), 1)
+        self.assertEqual(len(self.trader.get_open_positions()), 1)
+
+        summary = self.trader.reset_paper_account(reason="test_reset")
+
+        self.assertFalse(_history_csv().exists())
+        self.assertEqual(self.trader.get_trade_history(), [])
+        self.assertEqual(self.trader.get_open_positions(), [])
+        self.assertAlmostEqual(self.trader.cash_balance, 10100)
+
+        archive_dir = config.DATA_DIR / "futures_sessions" / summary["session_id"]
+        self.assertTrue((archive_dir / "trade_history.csv").exists())
+        self.assertTrue((archive_dir / "open_positions.json").exists())
+
+        saved_open = json.loads(_open_positions_json().read_text(encoding="utf-8"))
+        self.assertEqual(saved_open["positions"], [])
+        self.assertAlmostEqual(saved_open["cash_balance"], 10100)
+
+        sessions = recent_reset_sessions(limit=1)
+        self.assertEqual(sessions[-1]["session_id"], summary["session_id"])
+        self.assertEqual(int(sessions[-1]["archived_closed_trades"]), 1)
+        self.assertEqual(int(sessions[-1]["archived_open_positions"]), 1)
 
     def test_contribution_schedule_marks_one_year(self):
         config.MONTHLY_CONTRIBUTION_USD = 100

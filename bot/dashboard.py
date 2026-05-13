@@ -6,7 +6,7 @@ import time
 import tkinter as tk
 from collections import defaultdict
 from datetime import datetime, timezone
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 import matplotlib
 matplotlib.use("Agg")
@@ -18,10 +18,11 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import csv as _csv
 
 from bot import config
+import rebound_duration_analysis as rebound_analysis
 from bot.modules import accounting
 from bot.modules import telegram_notifier as tg
 from bot.modules.event_ledger import EventLedger, append_event
-from bot.modules.futures_trader import _history_csv
+from bot.modules.futures_trader import _history_csv, recent_reset_sessions
 from bot.modules.p2p_arbitrage import (
     P2PDepthSweep,
     P2PJournal,
@@ -73,6 +74,16 @@ class Dashboard:
         self._telegram_commands = None
         self._risk_kill_switch = False
         self._decision_log: list[dict[str, str]] = []
+        self._rebound_study_running = False
+        self._risk_panes = None
+
+        logger.info(
+            "Dashboard startup | auto_start=%s settings_confirmed=%s paused=%s data_dir=%s",
+            config.AUTO_START_FUTURES,
+            self._settings_confirmed,
+            self._paused,
+            config.DATA_DIR,
+        )
 
         # Equity history: list of (datetime, portfolio_value)
         self._equity_history: list[tuple[datetime, float]] = []
@@ -513,6 +524,8 @@ class Dashboard:
                    command=self._refresh_risk_tab).pack(side="right")
         ttk.Button(top, text="Export Ops Report", style="Btn.TButton",
                    command=self._export_ops_report).pack(side="right", padx=(0, 6))
+        ttk.Button(top, text="Run 5Y Rebound", style="Btn.TButton",
+                   command=self._run_rebound_study).pack(side="right", padx=(0, 6))
 
         self._risk_summary_var = tk.StringVar(value="")
         ttk.Label(body, textvariable=self._risk_summary_var,
@@ -581,14 +594,17 @@ class Dashboard:
                   font=("Consolas", 9)).pack(side="left", padx=10)
 
         panes = tk.PanedWindow(body, orient=tk.VERTICAL, sashwidth=4, bg="#0d1117")
+        self._risk_panes = panes
         panes.pack(fill="both", expand=True)
 
         risk_frame = tk.Frame(panes, bg="#0d1117")
-        panes.add(risk_frame, minsize=220)
+        panes.add(risk_frame, minsize=155)
         ttk.Label(risk_frame, text="RISK, PROFILE, AND FORWARD TEST", style="Header.TLabel",
                   background="#0d1117").pack(anchor="w", pady=(0, 3))
         cols = ("metric", "value", "limit", "status")
-        self.risk_tree = ttk.Treeview(risk_frame, columns=cols, show="headings", height=9)
+        risk_table = tk.Frame(risk_frame, bg="#0d1117")
+        risk_table.pack(fill="both", expand=True)
+        self.risk_tree = ttk.Treeview(risk_table, columns=cols, show="headings", height=7)
         for col, heading, width in [
             ("metric", "METRIC", 210),
             ("value", "VALUE", 220),
@@ -600,14 +616,19 @@ class Dashboard:
         self.risk_tree.tag_configure("ok", foreground="#3fb950")
         self.risk_tree.tag_configure("warn", foreground="#e3b341")
         self.risk_tree.tag_configure("block", foreground="#f85149")
-        self.risk_tree.pack(fill="both", expand=True)
+        risk_vsb = ttk.Scrollbar(risk_table, orient="vertical", command=self.risk_tree.yview)
+        self.risk_tree.configure(yscrollcommand=risk_vsb.set)
+        self.risk_tree.pack(side="left", fill="both", expand=True)
+        risk_vsb.pack(side="right", fill="y")
 
         decision_frame = tk.Frame(panes, bg="#0d1117")
-        panes.add(decision_frame, minsize=220)
+        panes.add(decision_frame, minsize=115)
         ttk.Label(decision_frame, text="STRATEGY CONFIDENCE / DECISION LOG", style="Header.TLabel",
                   background="#0d1117").pack(anchor="w", pady=(8, 3))
         dcols = ("time", "domain", "action", "decision", "score", "reason")
-        self.decision_tree = ttk.Treeview(decision_frame, columns=dcols, show="headings", height=8)
+        decision_table = tk.Frame(decision_frame, bg="#0d1117")
+        decision_table.pack(fill="both", expand=True)
+        self.decision_tree = ttk.Treeview(decision_table, columns=dcols, show="headings", height=5)
         for col, heading, width in [
             ("time", "TIME", 125),
             ("domain", "DOMAIN", 85),
@@ -621,8 +642,12 @@ class Dashboard:
         self.decision_tree.tag_configure("go", foreground="#3fb950")
         self.decision_tree.tag_configure("wait", foreground="#e3b341")
         self.decision_tree.tag_configure("block", foreground="#f85149")
-        self.decision_tree.pack(fill="both", expand=True)
+        decision_vsb = ttk.Scrollbar(decision_table, orient="vertical", command=self.decision_tree.yview)
+        self.decision_tree.configure(yscrollcommand=decision_vsb.set)
+        self.decision_tree.pack(side="left", fill="both", expand=True)
+        decision_vsb.pack(side="right", fill="y")
         self._refresh_risk_tab()
+        self.root.after(150, self._fit_risk_panes)
 
     def _build_charts_tab(self, parent):
         ctrl = tk.Frame(parent, bg="#0d1117", pady=8)
@@ -774,6 +799,8 @@ class Dashboard:
                    command=self._refresh_history).pack(side="left")
         ttk.Button(ctrl, text="Export Report", style="Btn.TButton",
                    command=self._export_history_report).pack(side="left", padx=(6, 0))
+        ttk.Button(ctrl, text="Reset Futures Paper", style="Btn.TButton",
+                   command=self._reset_futures_paper).pack(side="left", padx=(6, 0))
         self._hist_summary_var = tk.StringVar(value="")
         ttk.Label(ctrl, textvariable=self._hist_summary_var, foreground="#8b949e",
                   background="#0d1117", font=("Consolas", 9)).pack(side="left", padx=12)
@@ -800,13 +827,27 @@ class Dashboard:
         self.hist_tree.tag_configure("win",  foreground="#3fb950")
         self.hist_tree.tag_configure("loss", foreground="#f85149")
 
+    def _futures_history_session_note(self) -> str:
+        sessions = recent_reset_sessions(limit=1)
+        if not sessions:
+            return ""
+        last = sessions[-1]
+        reset_time = last.get("reset_time", "")[:16].replace("T", " ")
+        archived_trades = int(self._num(last.get("archived_closed_trades")))
+        archived_open = int(self._num(last.get("archived_open_positions")))
+        return (
+            f"  |  Current session since {reset_time} UTC"
+            f"  |  archived {archived_trades} trades/{archived_open} open"
+        )
+
     def _refresh_history(self):
         for item in self.hist_tree.get_children():
             self.hist_tree.delete(item)
 
         path = _history_csv()
         if not path.exists():
-            self._hist_summary_var.set("No trade history yet.")
+            note = self._futures_history_session_note()
+            self._hist_summary_var.set("No current-session trade history yet." + note)
             return
 
         rows = []
@@ -818,7 +859,8 @@ class Dashboard:
         total_pnl = sum(float(r.get("pnl_usd", 0)) for r in rows)
         wr = (wins / total * 100) if total else 0
         self._hist_summary_var.set(
-            f"  {total} trades  |  Win rate: {wr:.1f}%  |  Total P&L: ${total_pnl:+.2f}")
+            f"  {total} trades  |  Win rate: {wr:.1f}%  |  Total P&L: ${total_pnl:+.2f}"
+            f"{self._futures_history_session_note()}")
 
         for r in reversed(rows):
             pnl = float(r.get("pnl_pct", 0))
@@ -837,6 +879,52 @@ class Dashboard:
                 r.get("reason",""),
                 f"{float(r.get('entry_change_24h',0)):+.2f}%",
             ))
+
+    def _reset_futures_paper(self):
+        open_count = len(self.trader.get_open_positions())
+        closed_count = len(self.trader.get_trade_history())
+        msg = (
+            "Archive the current futures paper session and start a fresh one?\n\n"
+            f"Closed trades to archive: {closed_count}\n"
+            f"Open positions to archive/clear: {open_count}\n\n"
+            "P2P paper data will not be changed. Futures will be paused after reset."
+        )
+        if not messagebox.askyesno("Reset Futures Paper", msg, parent=self.root):
+            return
+
+        self._paused = True
+        self.pause_btn.config(text="Resume")
+        self._force_event.clear()
+        self._write_env({"AUTO_START_FUTURES": "false"})
+        config.AUTO_START_FUTURES = False
+        try:
+            summary = self.trader.reset_paper_account(reason="dashboard_reset")
+        except Exception as exc:
+            logger.exception("Failed to reset futures paper account")
+            self.status_var.set(f"Futures reset failed: {exc}")
+            return
+
+        with self._equity_lock:
+            self._equity_history.clear()
+        self._last_cycle_time = None
+        self._last_cycle_summary = {}
+        self._next_cycle_ts = 0.0
+        self._record_decision(
+            "futures",
+            "paper_reset",
+            "UPDATED",
+            100,
+            f"archived to {summary['session_id']}",
+        )
+        self.status_var.set(
+            f"Futures paper reset. Archived to {summary['session_id']}; trading is paused."
+        )
+        self._refresh_history()
+        self._update_stats()
+        self._update_positions()
+        self._update_closed()
+        if hasattr(self, "ledger_tree"):
+            self._refresh_event_ledger()
 
     def _export_history_report(self):
         path = _history_csv()
@@ -966,6 +1054,8 @@ class Dashboard:
                   background="#0d1117").pack(side="left")
         ttk.Button(top, text="Refresh Prices", style="Btn.TButton",
                    command=self._refresh_p2p).pack(side="right")
+        ttk.Button(top, text="P2P Guide", style="Btn.TButton",
+                   command=self._show_p2p_guide).pack(side="right", padx=(0, 6))
 
         controls = tk.Frame(body, bg="#0d1117")
         controls.pack(fill="x", pady=(0, 4))
@@ -1174,6 +1264,34 @@ class Dashboard:
         )
         self._refresh_p2p_journal()
         self._refresh_p2p_transactions()
+
+    def _show_p2p_guide(self):
+        text = (
+            "Inputs\n"
+            "Capital PHP: paper bankroll used for route sizing.\n"
+            "Min net %: minimum net profit after paper buffers before a route can execute.\n"
+            "Xfer fee USDT: simulated crypto transfer/network cost deducted from the route.\n"
+            "Buffer PHP: extra peso cost buffer deducted from expected profit.\n"
+            "Delay min: settlement-delay assumption; longer delay increases spread-decay risk.\n"
+            "Cancel %: simulated failed/cancelled order rate haircut.\n"
+            "Decay %: spread haircut while manual P2P settlement is happening.\n\n"
+            "Modes\n"
+            "Paper Sim (Live Data): reads live listings and can write paper transactions.\n"
+            "Live Assist: reads live listings only; it does not change paper balance.\n\n"
+            "Buttons\n"
+            "Refresh Prices: fetch latest P2P listings.\n"
+            "Recalculate Only: rebuild routes without recording a paper trade.\n"
+            "Paper Buy+Sell: simulate one complete buy-low/sell-high cycle if a route passes filters.\n"
+            "Paper Buy Hold: buy paper USDT inventory and wait for a better sell price.\n"
+            "Check/Sell Hold: sell the open paper hold only if the current sell route meets target.\n"
+            "Reset Paper: reset P2P paper balance/history only; futures is not touched.\n"
+            "Send TG: send the current P2P dashboard snapshot to Telegram.\n\n"
+            "Checkboxes\n"
+            "TG Alerts: send paper/live-assist alerts to Telegram.\n"
+            "Auto Cycle: on refresh, auto-run Paper Buy+Sell only when a profitable route passes filters.\n"
+            "Auto Hold Sell: on refresh, auto-check the open hold and sell only when target is met."
+        )
+        messagebox.showinfo("P2P Arb Controls", text, parent=self.root)
 
     def _build_p2p_history_tab(self, parent):
         body = tk.Frame(parent, bg="#0d1117", padx=15, pady=12)
@@ -2340,6 +2458,11 @@ class Dashboard:
         except Exception:
             p2p_state = {}
         backtests = sorted(config.DATA_DIR.glob("backtest*.txt")) if config.DATA_DIR.exists() else []
+        try:
+            rebound = rebound_analysis.latest_study_summary(config.DATA_DIR)
+        except Exception:
+            logger.debug("Could not load rebound study summary", exc_info=True)
+            rebound = {}
         return {
             "portfolio": portfolio,
             "cash": cash,
@@ -2355,6 +2478,7 @@ class Dashboard:
             "data_dir": str(config.DATA_DIR),
             "backtest_count": len(backtests),
             "latest_backtest": backtests[-1].name if backtests else "none",
+            "rebound": rebound,
         }
 
     def _risk_allows_trading(self) -> tuple[bool, list[str]]:
@@ -2477,6 +2601,11 @@ class Dashboard:
 
         row("Bot profile", snap["profile"], "restart required after change", "ACTIVE", "ok")
         row("Data folder", self._clip_text(snap["data_dir"], 64), "", "LOCAL", "ok")
+        entry_tag = "ok" if allowed and not self._paused else "block" if not allowed else "warn"
+        entry_status = "READY" if allowed and not self._paused else "BLOCKED" if not allowed else "PAUSED"
+        entry_value = "entries allowed" if allowed and not self._paused else "; ".join(reasons) if reasons else "press Resume or Run Now"
+        entry_limit = "risk guard + pause state"
+        row("New futures entries", entry_value, entry_limit, entry_status, entry_tag)
         row(
             "Daily futures P&L",
             f"${snap['daily_pnl']:+,.2f}",
@@ -2514,8 +2643,76 @@ class Dashboard:
             "ACTIVE",
             "warn",
         )
+        rebound = snap.get("rebound") or {}
+        if rebound:
+            row(
+                "5Y rebound study",
+                f"hit {rebound.get('hit_rate_pct')}% | med {rebound.get('median_days')}d | p90 {rebound.get('p90_days')}d",
+                f"dip<=-2% -> TP {rebound.get('target_pct')}%",
+                f"{rebound.get('events')} events",
+                "ok",
+            )
+            coverage_total = int(self._num(rebound.get("coverage_total")))
+            coverage_ok = int(self._num(rebound.get("coverage_ok")))
+            row(
+                "Rebound coverage",
+                f"{coverage_ok}/{coverage_total} symbols",
+                self._clip_text(rebound.get("generated_name", ""), 42),
+                "CURRENT TOP-50 BIAS",
+                "warn",
+            )
+        else:
+            row("5Y rebound study", "not run yet", "Run 5Y Rebound", "MISSING", "warn")
         row("Backtest files", f"{snap['backtest_count']} | latest {snap['latest_backtest']}", "", "FORWARD TESTING", "ok")
         self._refresh_decision_tree()
+
+    def _fit_risk_panes(self):
+        panes = getattr(self, "_risk_panes", None)
+        if panes is None:
+            return
+        try:
+            height = panes.winfo_height()
+            if height <= 1:
+                self.root.after(150, self._fit_risk_panes)
+                return
+            first_pane_height = max(135, height - 175)
+            panes.sash_place(0, 0, first_pane_height)
+        except tk.TclError:
+            return
+
+    def _run_rebound_study(self):
+        if self._rebound_study_running:
+            self._risk_action_var.set("5Y rebound study already running...")
+            return
+        self._rebound_study_running = True
+        self._risk_action_var.set("Running 5Y rebound study in background...")
+        self._record_decision("research", "5y_rebound", "RUN", 80, "background study started")
+
+        def worker():
+            try:
+                rebound_analysis.main()
+                summary = rebound_analysis.latest_study_summary(config.DATA_DIR)
+                if summary:
+                    status = (
+                        f"5Y rebound updated: hit {summary.get('hit_rate_pct')}%, "
+                        f"p90 {summary.get('p90_days')}d"
+                    )
+                else:
+                    status = "5Y rebound study finished; summary not found."
+                self._record_decision("research", "5y_rebound", "UPDATED", 90, status)
+            except Exception as exc:
+                logger.exception("5Y rebound study failed")
+                status = f"5Y rebound study failed: {exc}"
+                self._record_decision("research", "5y_rebound", "BLOCK", 0, status)
+            finally:
+                self._rebound_study_running = False
+                try:
+                    self.root.after(0, lambda: self._risk_action_var.set(status))
+                    self.root.after(0, self._refresh_risk_tab)
+                except tk.TclError:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _record_decision(
         self,
@@ -2613,6 +2810,15 @@ class Dashboard:
             f"  Open positions: {snap['open_count']}",
             f"  Open notional: ${snap['open_notional']:,.2f}",
             f"  Trades: {stats.get('total_trades', 0)} | Win rate: {stats.get('win_rate', 0):.1f}%",
+        ]
+        rebound = snap.get("rebound") or {}
+        if rebound:
+            lines.extend([
+                f"  5Y rebound: hit {rebound.get('hit_rate_pct')}% | "
+                f"median {rebound.get('median_days')}d | p90 {rebound.get('p90_days')}d",
+                f"  Rebound report: {rebound.get('report_path')}",
+            ])
+        lines.extend([
             "",
             "P2P Paper",
             f"  Balance: {self._num(p2p_state.get('balance_php')):,.0f} PHP",
@@ -2621,7 +2827,7 @@ class Dashboard:
             f"  Transactions: {len(p2p_state.get('transactions', []))}",
             "",
             "Recent Decisions",
-        ]
+        ])
         for row in decisions:
             lines.append(
                 f"  {row['timestamp'][:16]} {row['domain']} {row['action']} "
@@ -2644,6 +2850,7 @@ class Dashboard:
         tab = nb.tab(nb.select(), "text").strip()
         if tab == "Risk":
             self._refresh_risk_tab()
+            self.root.after(50, self._fit_risk_panes)
         elif tab == "Charts":
             self._draw_charts()
         elif tab == "History":
