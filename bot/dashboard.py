@@ -2323,18 +2323,29 @@ class Dashboard:
                   foreground="#8b949e", background="#0d1117",
                   font=("Consolas", 9)).pack(side="left", padx=(6, 0))
 
+        # Pre-trade wave analysis
+        self._s_pretrade_enabled = tk.BooleanVar(value=config.PRE_TRADE_ANALYSIS_ENABLED)
+        pretrade_frame = tk.Frame(grid, bg="#0d1117")
+        pretrade_frame.grid(row=7, column=1, sticky="w", padx=8, pady=4)
+        ttk.Label(grid, text="Pre-trade wave check", foreground="#8b949e", background="#0d1117",
+                  font=("Consolas", 9), width=22).grid(row=7, column=0, sticky="w", pady=4)
+        ttk.Checkbutton(pretrade_frame, text="Enable", variable=self._s_pretrade_enabled).pack(side="left")
+
+        self._s_pretrade_score = tk.StringVar(value=str(round(config.PRE_TRADE_MIN_SCORE, 0)))
+        row("Min pre-trade score", lambda p: field(p, self._s_pretrade_score, 8), 8)
+
         # Monthly contribution
         self._s_monthly_contribution = tk.StringVar(value=str(round(config.MONTHLY_CONTRIBUTION_USD, 2)))
-        row("Monthly contribution ($)", lambda p: field(p, self._s_monthly_contribution, 8), 7)
+        row("Monthly contribution ($)", lambda p: field(p, self._s_monthly_contribution, 8), 9)
 
         self._s_monthly_day = tk.StringVar(value=str(config.MONTHLY_CONTRIBUTION_DAY))
-        row("Contribution day", lambda p: field(p, self._s_monthly_day, 8), 8)
+        row("Contribution day", lambda p: field(p, self._s_monthly_day, 8), 10)
 
         self._s_auto_start = tk.BooleanVar(value=config.AUTO_START_FUTURES)
         auto_frame = tk.Frame(grid, bg="#0d1117")
-        auto_frame.grid(row=9, column=1, sticky="w", padx=8, pady=4)
+        auto_frame.grid(row=11, column=1, sticky="w", padx=8, pady=4)
         ttk.Label(grid, text="Auto-start futures", foreground="#8b949e", background="#0d1117",
-                  font=("Consolas", 9), width=22).grid(row=9, column=0, sticky="w", pady=4)
+                  font=("Consolas", 9), width=22).grid(row=11, column=0, sticky="w", pady=4)
         ttk.Checkbutton(auto_frame, text="Enable on launch", variable=self._s_auto_start).pack(side="left")
 
         # Apply button
@@ -2390,6 +2401,8 @@ class Dashboard:
             hold_days = int(self._s_hold.get())
             per_trade = float(self._s_per_trade.get()) / 100
             max_open_trades = int(self._s_max_open_trades.get())
+            pretrade_enabled = self._s_pretrade_enabled.get()
+            pretrade_score = float(self._s_pretrade_score.get())
             monthly_contribution = float(self._s_monthly_contribution.get())
             monthly_day = int(self._s_monthly_day.get())
             auto_start = self._s_auto_start.get()
@@ -2407,6 +2420,9 @@ class Dashboard:
             return
         if not 1 <= max_open_trades <= config.MAX_OPEN_TRADES_CAP:
             self._s_status.set(f"Error: max open trades must be 1-{config.MAX_OPEN_TRADES_CAP}")
+            return
+        if not 0 <= pretrade_score <= 100:
+            self._s_status.set("Error: min pre-trade score must be 0-100")
             return
         if not 1 <= monthly_day <= 31:
             self._s_status.set("Error: contribution day must be 1-31")
@@ -2433,6 +2449,8 @@ class Dashboard:
             "MAX_HOLD_DAYS":      hold_days,
             "PER_TRADE_PCT":      per_trade,
             "MAX_OPEN_TRADES":    max_open_trades,
+            "PRE_TRADE_ANALYSIS_ENABLED": "true" if pretrade_enabled else "false",
+            "PRE_TRADE_MIN_SCORE": pretrade_score,
             "MONTHLY_CONTRIBUTION_USD": monthly_contribution,
             "MONTHLY_CONTRIBUTION_DAY": monthly_day,
             "AUTO_START_FUTURES": "true" if auto_start else "false",
@@ -2450,6 +2468,8 @@ class Dashboard:
         old_max_open_trades = config.MAX_OPEN_TRADES
         config.MAX_OPEN_TRADES    = max_open_trades
         config.TOP_N_LOSERS       = max(config.TOP_N_LOSERS, config.MAX_OPEN_TRADES)
+        config.PRE_TRADE_ANALYSIS_ENABLED = pretrade_enabled
+        config.PRE_TRADE_MIN_SCORE = pretrade_score
         config.MONTHLY_CONTRIBUTION_USD = monthly_contribution
         config.MONTHLY_CONTRIBUTION_DAY = monthly_day
         config.AUTO_START_FUTURES = auto_start
@@ -2469,6 +2489,7 @@ class Dashboard:
             capital_note = f"  |  Cash {sign}${abs(applied_capital_delta):,.2f}"
         self._s_status.set(
             f"Applied!  Leverage: {leverage}x  |  Max open: {max_open_trades}  |  "
+            f"Pretrade: {'ON' if pretrade_enabled else 'OFF'} {pretrade_score:.0f}  |  "
             f"TP: {tp_pct*100:.2f}%  |  SL: {'ON' if sl_on else 'OFF'}  |  "
             f"Add ${monthly_contribution:.2f}/mo"
             f"{capital_note}")
@@ -3042,8 +3063,17 @@ class Dashboard:
                         "RUN",
                         80,
                         f"dips {summary.get('dips_found', 0)} opened {summary.get('positions_opened', 0)} "
-                        f"filled {summary.get('slots_filled', 0)} closed {summary.get('positions_closed', 0)}",
+                        f"filled {summary.get('slots_filled', 0)} closed {summary.get('positions_closed', 0)} "
+                        f"prewait {summary.get('pre_trade_wait', 0)}",
                     )
+                    for row in summary.get("pre_trade_decisions", [])[-12:]:
+                        self._record_decision(
+                            "futures",
+                            f"pretrade {row.get('symbol', '')}",
+                            row.get("decision", "WAIT"),
+                            self._num(row.get("score")),
+                            row.get("reason", ""),
+                        )
                 self._last_cycle_time    = datetime.now(timezone.utc)
                 self._last_cycle_summary = summary
                 self._next_cycle_ts      = now_ts + scan_interval

@@ -183,6 +183,171 @@ class FuturesPosition:
     margin_mode: str = "cross"
 
 
+@dataclass
+class PreTradeAnalysis:
+    """Pre-entry wave/volatility analysis for a futures candidate."""
+
+    symbol: str
+    decision: str
+    score: float
+    reason: str
+    current_price: float
+    change_24h_pct: float
+    change_4h_pct: float
+    change_1h_pct: float
+    rebound_from_low_pct: float
+    range_24h_pct: float
+    above_sma20_pct: float
+
+    @property
+    def allowed(self) -> bool:
+        return self.decision == "RUN"
+
+    def as_dict(self) -> dict:
+        return {
+            "symbol": self.symbol,
+            "decision": self.decision,
+            "score": self.score,
+            "reason": self.reason,
+            "current_price": self.current_price,
+            "change_24h_pct": self.change_24h_pct,
+            "change_4h_pct": self.change_4h_pct,
+            "change_1h_pct": self.change_1h_pct,
+            "rebound_from_low_pct": self.rebound_from_low_pct,
+            "range_24h_pct": self.range_24h_pct,
+            "above_sma20_pct": self.above_sma20_pct,
+        }
+
+
+def _pct_change(current: float, previous: float) -> float:
+    return ((current - previous) / previous * 100) if previous > 0 else 0.0
+
+
+def analyze_pre_trade_klines(symbol: str, klines: list) -> PreTradeAnalysis:
+    """Score whether a dip candidate has a tradable rebound structure.
+
+    This is a deterministic paper-trading guard. It is not a prediction model;
+    it simply refuses entries that are still pressing new lows, lack volatility,
+    or show short-term momentum against the planned long.
+    """
+    if not klines or len(klines) < 20:
+        return PreTradeAnalysis(
+            symbol=symbol,
+            decision="WAIT",
+            score=0,
+            reason="not enough candle data for pre-trade analysis",
+            current_price=0.0,
+            change_24h_pct=0.0,
+            change_4h_pct=0.0,
+            change_1h_pct=0.0,
+            rebound_from_low_pct=0.0,
+            range_24h_pct=0.0,
+            above_sma20_pct=0.0,
+        )
+
+    closes = [float(k[4]) for k in klines if float(k[4]) > 0]
+    highs = [float(k[2]) for k in klines if float(k[2]) > 0]
+    lows = [float(k[3]) for k in klines if float(k[3]) > 0]
+    if len(closes) < 20 or not highs or not lows:
+        return PreTradeAnalysis(
+            symbol=symbol,
+            decision="WAIT",
+            score=0,
+            reason="invalid candle data for pre-trade analysis",
+            current_price=0.0,
+            change_24h_pct=0.0,
+            change_4h_pct=0.0,
+            change_1h_pct=0.0,
+            rebound_from_low_pct=0.0,
+            range_24h_pct=0.0,
+            above_sma20_pct=0.0,
+        )
+
+    current = closes[-1]
+    low_24h = min(lows)
+    high_24h = max(highs)
+    change_24h = _pct_change(current, closes[0])
+    change_4h = _pct_change(current, closes[-17] if len(closes) >= 17 else closes[0])
+    change_1h = _pct_change(current, closes[-5] if len(closes) >= 5 else closes[0])
+    rebound_from_low = _pct_change(current, low_24h)
+    range_24h = _pct_change(high_24h, low_24h)
+    sma20 = sum(closes[-20:]) / 20
+    above_sma20 = _pct_change(current, sma20)
+    last_three_up = len(closes) >= 4 and closes[-1] > closes[-2] > closes[-3]
+
+    score = 50.0
+    notes: list[str] = []
+    blockers: list[str] = []
+
+    if rebound_from_low >= config.PRE_TRADE_MIN_REBOUND_PCT:
+        score += 20
+    else:
+        score -= 30
+        blockers.append(f"no rebound from 24h low ({rebound_from_low:+.2f}%)")
+
+    if change_1h >= 0.15:
+        score += 15
+    elif change_1h >= -0.20:
+        score += 5
+    elif change_1h <= -config.PRE_TRADE_MAX_1H_DROP_PCT:
+        score -= 25
+        blockers.append(f"1h still falling ({change_1h:+.2f}%)")
+    else:
+        score -= 10
+        notes.append(f"soft 1h momentum {change_1h:+.2f}%")
+
+    if change_4h > 0:
+        score += 10
+    elif change_4h <= -config.PRE_TRADE_MAX_4H_DROP_PCT:
+        score -= 15
+        blockers.append(f"4h downtrend {change_4h:+.2f}%")
+
+    if range_24h >= config.PRE_TRADE_MIN_24H_RANGE_PCT:
+        score += 10
+    else:
+        score -= 20
+        blockers.append(f"low 24h range ({range_24h:.2f}%)")
+
+    if above_sma20 > 0:
+        score += 10
+    else:
+        score -= 5
+        notes.append(f"below 20-candle avg {above_sma20:+.2f}%")
+
+    if last_three_up:
+        score += 10
+    else:
+        score -= 5
+        notes.append("last candles not rising")
+
+    if change_24h <= -10:
+        score -= 10
+        notes.append(f"deep 24h drop {change_24h:+.2f}%")
+
+    score = max(0.0, min(100.0, score))
+    decision = "RUN" if score >= config.PRE_TRADE_MIN_SCORE and not blockers else "WAIT"
+    summary = (
+        f"24h {change_24h:+.2f}% | 4h {change_4h:+.2f}% | 1h {change_1h:+.2f}% | "
+        f"bounce {rebound_from_low:.2f}% | range {range_24h:.2f}%"
+    )
+    reason_parts = blockers or notes or ["wave structure acceptable"]
+    reason = f"{summary}; {'; '.join(reason_parts[:3])}"
+
+    return PreTradeAnalysis(
+        symbol=symbol,
+        decision=decision,
+        score=score,
+        reason=reason,
+        current_price=current,
+        change_24h_pct=change_24h,
+        change_4h_pct=change_4h,
+        change_1h_pct=change_1h,
+        rebound_from_low_pct=rebound_from_low,
+        range_24h_pct=range_24h,
+        above_sma20_pct=above_sma20,
+    )
+
+
 class FuturesTrader:
     """Paper-mode futures trader using current Binance prices."""
 
@@ -267,6 +432,39 @@ class FuturesTrader:
         if prev_close <= 0:
             return None
         return ((curr_close - prev_close) / prev_close) * 100
+
+    def pre_trade_analysis(self, symbol: str) -> PreTradeAnalysis:
+        """Analyze 24h wave structure before a new futures paper entry."""
+        pair = self._trading_pair(symbol)
+        try:
+            klines = self.client.futures_klines(
+                symbol=pair,
+                interval=config.PRE_TRADE_KLINE_INTERVAL,
+                limit=config.PRE_TRADE_KLINE_LIMIT,
+            )
+        except BinanceAPIException:
+            try:
+                klines = self.client.get_klines(
+                    symbol=pair,
+                    interval=config.PRE_TRADE_KLINE_INTERVAL,
+                    limit=config.PRE_TRADE_KLINE_LIMIT,
+                )
+            except BinanceAPIException as e:
+                logger.debug("No pre-trade kline data for %s: %s", pair, e)
+                return PreTradeAnalysis(
+                    symbol=symbol,
+                    decision="WAIT",
+                    score=0,
+                    reason=f"no Binance kline data for {pair}",
+                    current_price=0.0,
+                    change_24h_pct=0.0,
+                    change_4h_pct=0.0,
+                    change_1h_pct=0.0,
+                    rebound_from_low_pct=0.0,
+                    range_24h_pct=0.0,
+                    above_sma20_pct=0.0,
+                )
+        return analyze_pre_trade_klines(symbol, klines)
 
     def get_portfolio_value(self) -> float:
         """Cash balance + unrealized margin value using cached prices (no UI-thread API calls)."""

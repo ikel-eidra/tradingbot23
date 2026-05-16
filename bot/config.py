@@ -54,6 +54,19 @@ LOSS_COOLDOWN_HOURS = float(os.getenv("LOSS_COOLDOWN_HOURS", "24"))
 # Set to 0 to disable (re-enter immediately).
 TP_COOLDOWN_HOURS = float(os.getenv("TP_COOLDOWN_HOURS", "1"))
 
+# --- Pre-trade wave analysis ---
+# Before opening a futures paper trade, inspect Binance 15m candles over the
+# last 24h. This blocks "falling knife" entries where the 24h dip is still
+# making fresh lows instead of showing a usable bounce/rebound.
+PRE_TRADE_ANALYSIS_ENABLED = os.getenv("PRE_TRADE_ANALYSIS_ENABLED", "true").lower() == "true"
+PRE_TRADE_MIN_SCORE = float(os.getenv("PRE_TRADE_MIN_SCORE", "60"))
+PRE_TRADE_MIN_REBOUND_PCT = float(os.getenv("PRE_TRADE_MIN_REBOUND_PCT", "0.35"))
+PRE_TRADE_MAX_1H_DROP_PCT = float(os.getenv("PRE_TRADE_MAX_1H_DROP_PCT", "0.75"))
+PRE_TRADE_MAX_4H_DROP_PCT = float(os.getenv("PRE_TRADE_MAX_4H_DROP_PCT", "2.50"))
+PRE_TRADE_MIN_24H_RANGE_PCT = float(os.getenv("PRE_TRADE_MIN_24H_RANGE_PCT", "1.20"))
+PRE_TRADE_KLINE_INTERVAL = os.getenv("PRE_TRADE_KLINE_INTERVAL", "15m")
+PRE_TRADE_KLINE_LIMIT = int(os.getenv("PRE_TRADE_KLINE_LIMIT", "97"))
+
 # Skip new entries when BTC's 1h change is below this (negative) value.
 # Avoids buying alts during broad market dumps. Set to None to disable.
 _BTC_FILTER = os.getenv("BTC_REGIME_FILTER_PCT", "-0.015")

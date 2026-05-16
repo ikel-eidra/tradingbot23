@@ -151,6 +151,11 @@ All settings live in `.env`. The Settings tab in the GUI lets you change most of
 | `BREAK_EVEN_TRIGGER_PCT` | `0.005` | Slide SL to break-even after +0.5% move |
 | `LOSS_COOLDOWN_HOURS` | `24` | Hours to skip a coin after SL hit |
 | `TP_COOLDOWN_HOURS` | `1` | Hours to skip a coin after TP hit |
+| `PRE_TRADE_ANALYSIS_ENABLED` | `true` | Analyze Binance 15m candles before opening a futures trade |
+| `PRE_TRADE_MIN_SCORE` | `60` | Minimum 0-100 wave score required before entry |
+| `PRE_TRADE_MIN_REBOUND_PCT` | `0.35` | Required bounce from the 24h low to avoid fresh-low entries |
+| `PRE_TRADE_MAX_1H_DROP_PCT` | `0.75` | Blocks entry if the last 1h move is still dropping too hard |
+| `PRE_TRADE_MIN_24H_RANGE_PCT` | `1.20` | Blocks low-range coins that do not have enough movement for the paper TP |
 
 ### Telegram Alerts (Optional)
 

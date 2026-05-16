@@ -30,6 +30,7 @@ class Strategy:
         self.basket_month: int | None = None  # Month the basket was set
         self.basket_year: int | None = None
         self._crash_mode: bool = False
+        self.last_pre_trade_decisions: list[dict] = []
 
     def _rank(self, coin: dict) -> int | None:
         """Return the market-cap rank we use for the top-N guard."""
@@ -64,6 +65,75 @@ class Strategy:
                 skipped,
             )
         return eligible
+
+    @staticmethod
+    def _analysis_allowed(analysis) -> bool:
+        if analysis is None:
+            return True
+        if isinstance(analysis, dict):
+            return bool(analysis.get("allowed", analysis.get("decision") == "RUN"))
+        return bool(getattr(analysis, "allowed", False))
+
+    @staticmethod
+    def _analysis_dict(symbol: str, source: str, analysis) -> dict:
+        if isinstance(analysis, dict):
+            row = dict(analysis)
+        elif hasattr(analysis, "as_dict"):
+            row = analysis.as_dict()
+        else:
+            row = {
+                "symbol": symbol,
+                "decision": getattr(analysis, "decision", "RUN"),
+                "score": getattr(analysis, "score", 100),
+                "reason": getattr(analysis, "reason", "pre-trade analysis unavailable"),
+            }
+        row.setdefault("symbol", symbol)
+        row.setdefault("decision", "RUN" if row.get("allowed", True) else "WAIT")
+        row.setdefault("score", 100)
+        row.setdefault("reason", "pre-trade analysis unavailable")
+        row["source"] = source
+        return row
+
+    def _pre_trade_allows_entry(self, coin: dict, source: str) -> bool:
+        """Run optional wave/volatility analysis before opening a futures trade."""
+        if not config.PRE_TRADE_ANALYSIS_ENABLED:
+            return True
+        analyzer = getattr(self.trader, "pre_trade_analysis", None)
+        if analyzer is None:
+            return True
+
+        symbol = coin["symbol"]
+        try:
+            analysis = analyzer(symbol)
+        except Exception:
+            logger.exception("Pre-trade analysis failed for %s", symbol)
+            self.last_pre_trade_decisions.append({
+                "symbol": symbol,
+                "source": source,
+                "decision": "WAIT",
+                "score": 0,
+                "reason": "pre-trade analysis error",
+            })
+            return False
+
+        row = self._analysis_dict(symbol, source, analysis)
+        self.last_pre_trade_decisions.append(row)
+        if not self._analysis_allowed(analysis):
+            logger.info(
+                "[PRE-TRADE] WAIT %s | score %.0f | %s",
+                symbol,
+                float(row.get("score", 0) or 0),
+                row.get("reason", ""),
+            )
+            return False
+
+        logger.info(
+            "[PRE-TRADE] RUN %s | score %.0f | %s",
+            symbol,
+            float(row.get("score", 0) or 0),
+            row.get("reason", ""),
+        )
+        return True
 
     def should_refresh_basket(self, now: datetime | None = None) -> bool:
         """Check if we need a new monthly snapshot."""
@@ -257,6 +327,9 @@ class Strategy:
                 logger.debug("Skipping %s — already have open position", symbol)
                 continue
 
+            if not self._pre_trade_allows_entry(coin, "dip"):
+                continue
+
             cg_price   = coin.get("current_price")
             change_24h = coin.get("change_24h", 0.0)
             position = self.trader.open_position(
@@ -317,7 +390,11 @@ class Strategy:
         candidates.sort(key=lambda c: c["change_24h"])
 
         opened = []
-        for coin in candidates[:slots]:
+        for coin in candidates:
+            if len(opened) >= slots:
+                break
+            if not self._pre_trade_allows_entry(coin, "fill"):
+                continue
             position = self.trader.open_position(
                 coin["symbol"],
                 entry_price=coin["current_price"],
@@ -378,7 +455,11 @@ class Strategy:
             "positions_opened": 0,
             "positions_closed": 0,
             "slots_filled": 0,
+            "pre_trade_checked": 0,
+            "pre_trade_wait": 0,
+            "pre_trade_decisions": [],
         }
+        self.last_pre_trade_decisions = []
 
         if hasattr(self.trader, "apply_monthly_contribution"):
             contributed = self.trader.apply_monthly_contribution(now)
@@ -416,6 +497,13 @@ class Strategy:
             # Step 4: Fill any remaining empty slots (always invested)
             filled = self.fill_empty_slots()
             summary["slots_filled"] = len(filled)
+
+        summary["pre_trade_decisions"] = list(self.last_pre_trade_decisions)
+        summary["pre_trade_checked"] = len(self.last_pre_trade_decisions)
+        summary["pre_trade_wait"] = len([
+            d for d in self.last_pre_trade_decisions
+            if d.get("decision") != "RUN"
+        ])
 
         # Log summary
         stats = self.trader.get_stats()

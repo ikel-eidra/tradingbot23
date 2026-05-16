@@ -10,11 +10,23 @@ from bot.modules import accounting
 from bot.modules.futures_trader import (
     _history_csv,
     _open_positions_json,
+    analyze_pre_trade_klines,
     FuturesPositionStatus,
     FuturesTrader,
     recent_reset_sessions,
 )
 from tests.support import isolate_data_dir
+
+
+def _klines_from_closes(closes):
+    rows = []
+    prev = closes[0]
+    for close in closes:
+        high = max(prev, close) * 1.001
+        low = min(prev, close) * 0.999
+        rows.append([0, str(prev), str(high), str(low), str(close), "1000"])
+        prev = close
+    return rows
 
 
 class TestFuturesTrader(unittest.TestCase):
@@ -52,6 +64,26 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertGreater(pos.tp_price, 100)
         self.assertLess(pos.sl_price, 100)
         self.assertLess(pos.liquidation_price, pos.sl_price)
+
+    def test_pre_trade_analysis_blocks_falling_knife(self):
+        closes = [100 - (i * 0.12) for i in range(97)]
+
+        analysis = analyze_pre_trade_klines("TEST", _klines_from_closes(closes))
+
+        self.assertEqual(analysis.decision, "WAIT")
+        self.assertFalse(analysis.allowed)
+        self.assertIn("no rebound", analysis.reason)
+
+    def test_pre_trade_analysis_allows_rebound_wave(self):
+        closes = [100 - (i * 0.08) for i in range(70)]
+        closes += [94.4, 94.2, 94.0, 94.3, 94.7, 95.1, 95.5, 95.9, 96.2]
+        closes += [96.4] * (97 - len(closes))
+
+        analysis = analyze_pre_trade_klines("TEST", _klines_from_closes(closes))
+
+        self.assertEqual(analysis.decision, "RUN")
+        self.assertTrue(analysis.allowed)
+        self.assertGreaterEqual(analysis.score, config.PRE_TRADE_MIN_SCORE)
 
     def test_open_rejects_excluded_stablecoin_even_with_entry_price(self):
         with patch.object(self.trader, "get_current_price", return_value=1.0) as price_mock:

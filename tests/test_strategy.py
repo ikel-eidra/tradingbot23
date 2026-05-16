@@ -22,6 +22,8 @@ class TestStrategy(unittest.TestCase):
         config.TOP_N_COINS = 50
         config.TOP_N_LOSERS = 5
         config.MAX_OPEN_TRADES = 5
+        config.PRE_TRADE_ANALYSIS_ENABLED = True
+        config.PRE_TRADE_MIN_SCORE = 60
 
     def test_execute_signals_respects_max_open_slots(self):
         """Should not open more positions than the configured basket slots."""
@@ -126,6 +128,68 @@ class TestStrategy(unittest.TestCase):
         self.assertEqual([p.symbol for p in opened], ["GOOD"])
         self.assertEqual([p.symbol for p in trader.get_open_positions()], ["GOOD"])
 
+    def test_execute_signals_waits_when_pre_trade_wave_filter_blocks(self):
+        """A dip is not opened when the wave analysis says it is still falling."""
+
+        class FakeTrader:
+            def __init__(self):
+                self.positions = []
+
+            def get_open_positions(self):
+                return list(self.positions)
+
+            def pre_trade_analysis(self, symbol):
+                return SimpleNamespace(
+                    allowed=False,
+                    decision="WAIT",
+                    score=25,
+                    reason="1h still falling",
+                )
+
+            def open_position(self, symbol, entry_price=None, entry_change_24h=0.0):
+                raise AssertionError("open_position should not be called")
+
+        strategy = Strategy(trader=FakeTrader())
+        opened = strategy.execute_signals([
+            {"symbol": "BAD", "cmc_rank": 12, "current_price": 1.0, "change_24h": -5.0},
+        ])
+
+        self.assertEqual(opened, [])
+        self.assertEqual(strategy.last_pre_trade_decisions[0]["decision"], "WAIT")
+        self.assertEqual(strategy.last_pre_trade_decisions[0]["source"], "dip")
+
+    def test_execute_signals_opens_when_pre_trade_wave_filter_allows(self):
+        """A dip opens only after the wave score passes."""
+
+        class FakeTrader:
+            def __init__(self):
+                self.positions = []
+
+            def get_open_positions(self):
+                return list(self.positions)
+
+            def pre_trade_analysis(self, symbol):
+                return SimpleNamespace(
+                    allowed=True,
+                    decision="RUN",
+                    score=82,
+                    reason="wave structure acceptable",
+                )
+
+            def open_position(self, symbol, entry_price=None, entry_change_24h=0.0):
+                pos = SimpleNamespace(symbol=symbol)
+                self.positions.append(pos)
+                return pos
+
+        trader = FakeTrader()
+        strategy = Strategy(trader=trader)
+        opened = strategy.execute_signals([
+            {"symbol": "GOOD", "cmc_rank": 12, "current_price": 1.0, "change_24h": -5.0},
+        ])
+
+        self.assertEqual([p.symbol for p in opened], ["GOOD"])
+        self.assertEqual(strategy.last_pre_trade_decisions[0]["decision"], "RUN")
+
     def test_fill_empty_slots_skips_stale_outside_top_50_basket_entries(self):
         """Stale basket rows outside top 50 should not refill empty slots."""
 
@@ -202,6 +266,52 @@ class TestStrategy(unittest.TestCase):
 
         self.assertEqual([p.symbol for p in opened], ["AAA", "BBB"])
         self.assertEqual(len(trader.get_open_positions()), 2)
+
+    def test_fill_empty_slots_tries_next_candidate_after_pre_trade_wait(self):
+        """A rejected fill candidate should not consume the open slot."""
+
+        config.MAX_OPEN_TRADES = 1
+
+        class FakeFetcher:
+            def get_top_coins(self):
+                return [
+                    {"symbol": "BAD", "cmc_rank": 10, "price": 1.0, "percent_change_24h": -6.0},
+                    {"symbol": "GOOD", "cmc_rank": 11, "price": 2.0, "percent_change_24h": -5.0},
+                ]
+
+        class FakeTrader:
+            cash_balance = 1000
+
+            def __init__(self):
+                self.positions = []
+
+            def get_open_positions(self):
+                return list(self.positions)
+
+            def pre_trade_analysis(self, symbol):
+                return SimpleNamespace(
+                    allowed=symbol == "GOOD",
+                    decision="RUN" if symbol == "GOOD" else "WAIT",
+                    score=80 if symbol == "GOOD" else 20,
+                    reason="ok" if symbol == "GOOD" else "still falling",
+                )
+
+            def open_position(self, symbol, entry_price=None, entry_change_24h=0.0):
+                pos = SimpleNamespace(symbol=symbol)
+                self.positions.append(pos)
+                return pos
+
+        trader = FakeTrader()
+        strategy = Strategy(fetcher=FakeFetcher(), trader=trader)
+        strategy.basket = [
+            {"symbol": "BAD", "cmc_rank": 10},
+            {"symbol": "GOOD", "cmc_rank": 11},
+        ]
+
+        opened = strategy.fill_empty_slots()
+
+        self.assertEqual([p.symbol for p in opened], ["GOOD"])
+        self.assertEqual([d["decision"] for d in strategy.last_pre_trade_decisions], ["WAIT", "RUN"])
 
     def test_fill_empty_slots_skips_excluded_symbols_from_stale_basket(self):
         """A stale basket containing a newly excluded stablecoin should not refill it."""
