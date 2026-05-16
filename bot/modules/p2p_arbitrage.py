@@ -272,6 +272,7 @@ class P2PPaperArb:
 
     def reset(self, starting_php: float = 500_000.0) -> dict:
         now = datetime.now(timezone.utc).isoformat()
+        archive_dir = self._archive_current_session(now)
         state = {
             "started_at": now,
             "starting_php": float(starting_php),
@@ -290,11 +291,34 @@ class P2PPaperArb:
             amount_php=float(starting_php),
             cash_delta_php=float(starting_php),
             balance_after_php=float(starting_php),
-            notes="Paper account reset",
+            notes=(
+                f"Paper account reset; previous session archived to {archive_dir.name}"
+                if archive_dir
+                else "Paper account reset"
+            ),
             timestamp=now,
         )
         self._save(state)
         return state
+
+    def _archive_current_session(self, reset_time: str) -> Path | None:
+        if not self.path.exists() and not self.transaction_path.exists():
+            return None
+
+        stamp = reset_time.replace("-", "").replace(":", "").replace("+00:00", "Z")
+        stamp = stamp.split(".", 1)[0].replace("T", "_")
+        base = self.path.parent / "p2p_sessions" / f"reset_{stamp}"
+        archive_dir = base
+        suffix = 1
+        while archive_dir.exists():
+            archive_dir = self.path.parent / "p2p_sessions" / f"{base.name}_{suffix}"
+            suffix += 1
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        for source in (self.path, self.transaction_path):
+            if source.exists():
+                source.replace(archive_dir / source.name)
+        return archive_dir
 
     def sync_starting_capital(self, starting_php: float) -> tuple[dict, float]:
         """Apply a paper bankroll change without requiring a full reset.
@@ -345,6 +369,8 @@ class P2PPaperArb:
         starting_php: float = 500_000.0,
     ) -> tuple[dict, P2PPaperCycle | None]:
         state = self.state(starting_php)
+        if state.get("hold_position"):
+            return state, None
         if sweep.size_php <= 0 or sweep.profit_php <= 0 or sweep.profit_pct < min_profit_pct:
             return state, None
 
@@ -352,12 +378,13 @@ class P2PPaperArb:
         if sweep.size_php > cash_before + 0.01:
             return state, None
         cash_after = cash_before + sweep.profit_php
+        equity_after = cash_after + float((state.get("hold_position") or {}).get("cost_php", 0.0))
         cycle = P2PPaperCycle(
             timestamp=datetime.now(timezone.utc).isoformat(),
             size_php=sweep.size_php,
             profit_php=sweep.profit_php,
             profit_pct=sweep.profit_pct,
-            balance_after_php=cash_after,
+            balance_after_php=equity_after,
             avg_buy_price=sweep.avg_buy_price,
             avg_sell_price=sweep.avg_sell_price,
             warnings=sweep.warnings,

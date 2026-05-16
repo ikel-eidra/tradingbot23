@@ -43,23 +43,23 @@ def escape_html(value: Any) -> str:
 
 
 def dashboard_keyboard() -> dict:
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "Futures Dashboard", "callback_data": "dashboard:futures"},
-                {"text": "P2P Arb", "callback_data": "dashboard:p2p"},
-            ],
-            [
-                {"text": "Today P&L", "callback_data": "control:today"},
-                {"text": "Export Report", "callback_data": "control:export"},
-            ],
-            [
-                {"text": "Pause Bot", "callback_data": "control:pause"},
-                {"text": "Resume Bot", "callback_data": "control:resume"},
-                {"text": "Info", "callback_data": "dashboard:info"},
-            ],
-        ]
-    }
+    rows = [
+        [
+            {"text": "Futures Dashboard", "callback_data": "dashboard:futures"},
+            {"text": "P2P Arb", "callback_data": "dashboard:p2p"},
+        ],
+        [
+            {"text": "Today P&L", "callback_data": "control:today"},
+            {"text": "Export Report", "callback_data": "control:export"},
+        ],
+    ]
+    if config.TELEGRAM_ALLOW_CONTROL:
+        rows.append([
+            {"text": "Pause Bot", "callback_data": "control:pause"},
+            {"text": "Resume Bot", "callback_data": "control:resume"},
+        ])
+    rows.append([{"text": "Info", "callback_data": "dashboard:info"}])
+    return {"inline_keyboard": rows}
 
 
 def _api_url(method: str) -> str:
@@ -118,10 +118,10 @@ def default_info_text() -> str:
         "/dashboard - live futures paper dashboard\n"
         "/p2p - live USDT/PHP P2P assist snapshot\n"
         "/today - today's closed P&L and P2P paper summary\n"
-        "/pause or /resume - control the desktop paper loop\n"
         "/export - write a local operations report\n"
         "/info - automation scope and safety notes\n\n"
-        "P2P Paper Sim uses live listings and can send paper-event alerts. "
+        + ("/pause or /resume - control the desktop paper loop\n\n" if config.TELEGRAM_ALLOW_CONTROL else "Remote pause/resume is disabled by default.\n\n")
+        + "P2P Paper Sim uses live listings and can send paper-event alerts. "
         "P2P Live Assist can scan, score, alert, and log watch routes. "
         "Fiat payment, payment-completed confirmation, and crypto release stay manual."
     )

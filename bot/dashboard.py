@@ -71,6 +71,7 @@ class Dashboard:
         self._p2p_last_alert_ts = 0.0
         self._p2p_last_logged_route_key = ""
         self._p2p_last_auto_cycle_key = ""
+        self._p2p_last_auto_cycle_ts = 0.0
         self._telegram_commands = None
         self._risk_kill_switch = False
         self._decision_log: list[dict[str, str]] = []
@@ -352,13 +353,26 @@ class Dashboard:
             "P2P Paper Sim: uses live Binance listings, updates paper ledger, and can send Telegram paper-event alerts.\n"
             "P2P Live Assist: scan, spread score, Telegram alert, and watchlist log only.\n\n"
             "Manual in real P2P: choose counterparty, send fiat, confirm payment, verify receipt, release crypto, and handle disputes.\n"
-            "Commands: /dashboard, /p2p, /today, /pause, /resume, /export, /info"
+            "Commands: /dashboard, /p2p, /today, /export, /info"
+            + ("\nRemote pause/resume is enabled." if config.TELEGRAM_ALLOW_CONTROL else "\nRemote pause/resume is disabled by default.")
         )
 
     def _telegram_control(self, action: str) -> str:
         action = (action or "").lower()
         if action == "today":
             return self._telegram_today_text()
+        if action in {"pause", "resume"} and not config.TELEGRAM_ALLOW_CONTROL:
+            self._record_decision(
+                "telegram",
+                action,
+                "BLOCK",
+                0,
+                "remote futures controls disabled",
+            )
+            return (
+                "<b>Remote futures controls are disabled.</b>\n"
+                "Telegram can still show dashboard, P2P, today, info, and export snapshots."
+            )
         if action == "pause":
             self._paused = True
             self._record_decision("telegram", "pause", "BLOCK", 0, "pause requested from Telegram")
@@ -1288,7 +1302,8 @@ class Dashboard:
             "Send TG: send the current P2P dashboard snapshot to Telegram.\n\n"
             "Checkboxes\n"
             "TG Alerts: send paper/live-assist alerts to Telegram.\n"
-            "Auto Cycle: on refresh, auto-run Paper Buy+Sell only when a profitable route passes filters.\n"
+            "Auto Cycle: on refresh, auto-run Paper Buy+Sell only when a profitable route passes filters. "
+            "It compounds free cash, waits for the settlement-delay window, and pauses while a Hold is open.\n"
             "Auto Hold Sell: on refresh, auto-check the open hold and sell only when target is met."
         )
         messagebox.showinfo("P2P Arb Controls", text, parent=self.root)
@@ -1881,11 +1896,34 @@ class Dashboard:
         if not settings:
             return
         state, _ = self.p2p_paper.sync_starting_capital(settings.capital_php)
+        if state.get("hold_position"):
+            if not auto:
+                self._p2p_status_var.set(
+                    "Paper Buy+Sell skipped: a P2P hold is open. Sell or reset the hold first."
+                )
+            self._record_decision("p2p", "paper_cycle", "SKIP", 0, "hold position open")
+            self._refresh_p2p_paper_summary(state)
+            return
         paper_capital = self._num(state.get("cash_php", state.get("balance_php")), settings.capital_php)
         if paper_capital <= 0:
             if not auto:
                 self._p2p_status_var.set("Paper cycle skipped: no free PHP paper cash.")
             return
+        if auto:
+            cooldown = max(60.0, self._p2p_realism_settings().settlement_delay_mins * 60)
+            now = time.time()
+            if now - self._p2p_last_auto_cycle_ts < cooldown:
+                return
+            min_auto_size = max(5_000.0, settings.capital_php * 0.05)
+            if paper_capital < min_auto_size:
+                self._record_decision(
+                    "p2p",
+                    "paper_cycle",
+                    "SKIP",
+                    0,
+                    f"free cash {paper_capital:,.0f} below auto minimum {min_auto_size:,.0f}",
+                )
+                return
         paper_settings = P2PRouteSettings(
             capital_php=paper_capital,
             min_profit_php=settings.min_profit_php,
@@ -1921,6 +1959,7 @@ class Dashboard:
             )
             if auto:
                 self._p2p_last_auto_cycle_key = auto_key
+                self._p2p_last_auto_cycle_ts = time.time()
             self._record_decision(
                 "p2p",
                 "paper_cycle",

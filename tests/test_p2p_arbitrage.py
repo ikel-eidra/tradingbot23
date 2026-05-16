@@ -237,6 +237,59 @@ class TestP2PArbitrage(unittest.TestCase):
         self.assertGreater(float(reloaded["transactions"][-1]["profit_php"]), 0)
         self.assertIn("PAPER_CYCLE", csv_text)
 
+    def test_paper_arb_reset_archives_previous_transaction_csv(self):
+        snapshot = P2PSnapshot(
+            marketplace="Binance",
+            asset="USDT",
+            fiat="PHP",
+            buy_ads=[p2p_ad("BUY", "Binance", 60.00, 1_000, 100_000, 5_000, "seller")],
+            sell_ads=[p2p_ad("SELL", "Binance", 60.30, 1_000, 100_000, 5_000, "buyer")],
+            as_of=None,
+        )
+        sweep = build_depth_sweep(
+            [snapshot],
+            P2PRouteSettings(capital_php=50_000, min_profit_pct=0.1),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paper = P2PPaperArb(path=Path(tmpdir) / "paper.json")
+            paper.execute_if_profitable(sweep, min_profit_pct=0.1, starting_php=500_000)
+            paper.reset(500_000)
+            current_csv = (Path(tmpdir) / "p2p_transaction_history.csv").read_text(encoding="utf-8")
+            archives = list((Path(tmpdir) / "p2p_sessions").glob("reset_*"))
+            self.assertEqual(len(archives), 1)
+            self.assertTrue((archives[0] / "paper.json").exists())
+            self.assertTrue((archives[0] / "p2p_transaction_history.csv").exists())
+            self.assertIn("RESET", current_csv)
+            self.assertNotIn("PAPER_CYCLE", current_csv)
+
+    def test_paper_cycle_is_blocked_while_hold_is_open(self):
+        buy_snapshot = P2PSnapshot(
+            marketplace="Binance",
+            asset="USDT",
+            fiat="PHP",
+            buy_ads=[p2p_ad("BUY", "Binance", 60.00, 1_000, 100_000, 5_000, "seller")],
+            sell_ads=[p2p_ad("SELL", "Binance", 60.30, 1_000, 100_000, 5_000, "buyer")],
+            as_of=None,
+        )
+        entry = build_p2p_hold_entry(
+            [buy_snapshot],
+            P2PRouteSettings(capital_php=50_000, min_profit_pct=0.2),
+        )
+        sweep = build_depth_sweep(
+            [buy_snapshot],
+            P2PRouteSettings(capital_php=10_000, min_profit_pct=0.1),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paper = P2PPaperArb(path=Path(tmpdir) / "paper.json")
+            paper.open_hold(entry, target_profit_pct=0.2, starting_php=100_000)
+            state, cycle = paper.execute_if_profitable(sweep, min_profit_pct=0.1, starting_php=100_000)
+
+        self.assertIsNone(cycle)
+        self.assertEqual(state["transactions"][-1]["type"], "HOLD_BUY")
+        self.assertEqual(len(state["cycles"]), 0)
+
     def test_paper_arb_syncs_starting_capital_down_to_cash(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             paper = P2PPaperArb(path=Path(tmpdir) / "paper.json")

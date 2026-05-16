@@ -147,6 +147,7 @@ BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
 # --- Telegram alerts ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_ALLOW_CONTROL = os.getenv("TELEGRAM_ALLOW_CONTROL", "false").lower() == "true"
 
 # --- Logging ---
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
