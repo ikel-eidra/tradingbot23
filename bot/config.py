@@ -122,7 +122,14 @@ STABLECOIN_SYMBOLS = {
     "USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDP", "PYUSD",
     "USDE", "USD1", "USDD", "FRAX", "LUSD", "SUSD", "GUSD", "CUSD",
     "USDS", "USDX", "CUSDC", "ALUSD", "DOLA", "BEAN", "USDJ", "HUSD",
+    "USDG", "USD0", "USDF", "USDL", "USDR", "USR", "USYC", "RLUSD",
+    "USDTB", "USDSB", "USDM", "EURC", "EURS", "AEUR", "EURI",
 }
+FUTURES_EXCLUDED_SYMBOLS = set(STABLECOIN_SYMBOLS)
+
+
+def is_futures_excluded_symbol(symbol: str) -> bool:
+    return (symbol or "").upper() in FUTURES_EXCLUDED_SYMBOLS
 
 # --- Paths ---
 # Can be overridden per-user via env vars (multi-user Docker setup). BOT_PROFILE

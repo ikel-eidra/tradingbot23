@@ -72,6 +72,31 @@ class TestStrategy(unittest.TestCase):
         self.assertEqual(opened, [])
         self.assertEqual(trader.get_open_positions(), [])
 
+    def test_execute_signals_skips_excluded_stablecoin_symbols(self):
+        """Stablecoins from stale or external data should never open futures trades."""
+
+        class FakeTrader:
+            def __init__(self):
+                self.positions = []
+
+            def get_open_positions(self):
+                return list(self.positions)
+
+            def open_position(self, symbol, entry_price=None, entry_change_24h=0.0):
+                pos = SimpleNamespace(symbol=symbol)
+                self.positions.append(pos)
+                return pos
+
+        trader = FakeTrader()
+        strategy = Strategy(trader=trader)
+        opened = strategy.execute_signals([
+            {"symbol": "USDG", "cmc_rank": 20, "current_price": 1.0, "change_24h": -0.1},
+            {"symbol": "GOOD", "cmc_rank": 21, "current_price": 2.0, "change_24h": -5.0},
+        ])
+
+        self.assertEqual([p.symbol for p in opened], ["GOOD"])
+        self.assertEqual([p.symbol for p in trader.get_open_positions()], ["GOOD"])
+
     def test_fill_empty_slots_skips_stale_outside_top_50_basket_entries(self):
         """Stale basket rows outside top 50 should not refill empty slots."""
 
@@ -101,6 +126,42 @@ class TestStrategy(unittest.TestCase):
         strategy.basket = [
             {"symbol": "GOOD", "cmc_rank": 12},
             {"symbol": "STALE", "cmc_rank": 51},
+        ]
+
+        opened = strategy.fill_empty_slots()
+
+        self.assertEqual([p.symbol for p in opened], ["GOOD"])
+        self.assertEqual([p.symbol for p in trader.get_open_positions()], ["GOOD"])
+
+    def test_fill_empty_slots_skips_excluded_symbols_from_stale_basket(self):
+        """A stale basket containing a newly excluded stablecoin should not refill it."""
+
+        class FakeFetcher:
+            def get_top_coins(self):
+                return [
+                    {"symbol": "USDG", "cmc_rank": 20, "price": 1.0, "percent_change_24h": -8.0},
+                    {"symbol": "GOOD", "cmc_rank": 21, "price": 2.0, "percent_change_24h": -4.0},
+                ]
+
+        class FakeTrader:
+            cash_balance = 1000
+
+            def __init__(self):
+                self.positions = []
+
+            def get_open_positions(self):
+                return list(self.positions)
+
+            def open_position(self, symbol, entry_price=None, entry_change_24h=0.0):
+                pos = SimpleNamespace(symbol=symbol)
+                self.positions.append(pos)
+                return pos
+
+        trader = FakeTrader()
+        strategy = Strategy(fetcher=FakeFetcher(), trader=trader)
+        strategy.basket = [
+            {"symbol": "USDG", "cmc_rank": 20},
+            {"symbol": "GOOD", "cmc_rank": 21},
         ]
 
         opened = strategy.fill_empty_slots()

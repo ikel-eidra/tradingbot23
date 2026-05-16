@@ -66,6 +66,21 @@ class TestDataFetcher(unittest.TestCase):
         losers = self.fetcher.get_top_losers(coins, n_losers=10, min_volume=0)
         self.assertEqual(len(losers), 0)
 
+    def test_get_top_coins_excludes_usdg_stablecoin(self):
+        """New stablecoin symbols should not enter the futures universe."""
+        self.fetcher._get = lambda _url, _params: [
+            {"symbol": "usdg", "name": "Global Dollar", "market_cap_rank": 20,
+             "market_cap": 1e10, "current_price": 0.999, "price_change_percentage_24h": -0.01,
+             "total_volume": 1e8},
+            {"symbol": "btc", "name": "Bitcoin", "market_cap_rank": 1,
+             "market_cap": 1e12, "current_price": 100000, "price_change_percentage_24h": -2.0,
+             "total_volume": 5e10},
+        ]
+
+        coins = self.fetcher.get_top_coins(limit=2)
+
+        self.assertEqual([c["symbol"] for c in coins], ["BTC"])
+
 
 if __name__ == "__main__":
     unittest.main()

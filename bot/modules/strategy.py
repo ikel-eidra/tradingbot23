@@ -43,12 +43,22 @@ class Strategy:
         rank = self._rank(coin)
         return rank is not None and 1 <= rank <= config.TOP_N_COINS
 
+    def _is_tradeable_symbol(self, symbol: str) -> bool:
+        return not config.is_futures_excluded_symbol(symbol)
+
     def _filter_top_ranked(self, coins: list[dict], context: str) -> list[dict]:
-        eligible = [c for c in coins if self._is_top_ranked_coin(c)]
-        skipped = [c.get("symbol", "?") for c in coins if not self._is_top_ranked_coin(c)]
+        eligible = [
+            c for c in coins
+            if self._is_top_ranked_coin(c) and self._is_tradeable_symbol(c.get("symbol", ""))
+        ]
+        skipped = [
+            c.get("symbol", "?") for c in coins
+            if not self._is_top_ranked_coin(c)
+            or not self._is_tradeable_symbol(c.get("symbol", ""))
+        ]
         if skipped:
             logger.warning(
-                "%s skipped outside configured top %d: %s",
+                "%s skipped outside top %d or excluded futures symbols: %s",
                 context,
                 config.TOP_N_COINS,
                 skipped,
@@ -128,6 +138,9 @@ class Strategy:
         dipping = []
         for coin in self.basket:
             symbol = coin["symbol"]
+            if not self._is_tradeable_symbol(symbol):
+                logger.debug("Skipping %s — excluded from futures universe", symbol)
+                continue
             fresh_coin = fresh_data.get(symbol)
             if not self._is_top_ranked_coin(coin):
                 logger.debug("Skipping %s — basket rank is outside top %d", symbol, config.TOP_N_COINS)
@@ -160,6 +173,9 @@ class Strategy:
         dipping = []
         for coin in self.basket:
             symbol = coin["symbol"]
+            if not self._is_tradeable_symbol(symbol):
+                logger.debug("Skipping %s futures dip — excluded from futures universe", symbol)
+                continue
             change_5m = self.trader.get_5m_change(symbol)
             if change_5m is None:
                 continue
@@ -189,6 +205,8 @@ class Strategy:
         dipping = []
         for coin in self.basket:
             symbol = coin["symbol"]
+            if not self._is_tradeable_symbol(symbol):
+                continue
             if symbol not in price_data:
                 continue
 
@@ -217,6 +235,9 @@ class Strategy:
         opened = []
         for coin in dipping_coins:
             symbol = coin["symbol"]
+            if not self._is_tradeable_symbol(symbol):
+                logger.warning("Skipping %s — excluded from futures universe", symbol)
+                continue
             if not self._is_top_ranked_coin(coin):
                 logger.warning(
                     "Skipping %s — rank %s is outside configured top %d",
@@ -274,6 +295,9 @@ class Strategy:
             sym = coin["symbol"]
             fresh_coin = fresh_data.get(sym)
             if sym in open_symbols:
+                continue
+            if not self._is_tradeable_symbol(sym):
+                logger.debug("Skipping %s fill — excluded from futures universe", sym)
                 continue
             if not self._is_top_ranked_coin(coin):
                 logger.debug("Skipping %s fill — basket rank is outside top %d", sym, config.TOP_N_COINS)

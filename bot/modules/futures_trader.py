@@ -152,6 +152,7 @@ class FuturesPositionStatus(str, Enum):
     SL_HIT = "sl_hit"
     EXPIRED = "expired"
     LIQUIDATED = "liquidated"
+    EXCLUDED = "excluded"
 
 
 @dataclass
@@ -335,6 +336,11 @@ class FuturesTrader:
         entry_price: float | None = None, entry_change_24h: float = 0.0,
     ) -> FuturesPosition | None:
         """Open a paper futures long with TP, SL, and liquidation tracking."""
+        symbol = symbol.upper()
+        if config.is_futures_excluded_symbol(symbol):
+            logger.warning("Skipping %s — excluded from futures paper universe", symbol)
+            return None
+
         self._normalize_cash_balance()
         for pos in self.positions:
             if pos.symbol == symbol and pos.status == FuturesPositionStatus.OPEN:
@@ -388,9 +394,11 @@ class FuturesTrader:
             logger.warning("Cash too low ($%.2f) — skipping %s", margin_usd, symbol)
             return None
 
-        price = entry_price or self.get_current_price(symbol)
-        if price is None:
+        market_price = self.get_current_price(symbol)
+        if market_price is None:
+            logger.warning("Skipping %s — no Binance USDT price data available", symbol)
             return None
+        price = market_price
 
         notional = margin_usd * self.leverage
         quantity = notional / price
@@ -471,6 +479,11 @@ class FuturesTrader:
 
         open_positions = self.get_open_positions()
         for pos in open_positions:
+            if config.is_futures_excluded_symbol(pos.symbol):
+                pos.last_known_price = pos.entry_price
+                self._close(pos, pos.entry_price, FuturesPositionStatus.EXCLUDED, now)
+                closed.append(pos)
+                continue
             try:
                 price = self.get_current_price(pos.symbol)
             except Exception:
@@ -988,7 +1001,10 @@ class FuturesTrader:
         return [p for p in self.positions if p.status != FuturesPositionStatus.OPEN]
 
     def get_stats(self) -> dict:
-        closed = self.get_trade_history()
+        closed = [
+            p for p in self.get_trade_history()
+            if p.status != FuturesPositionStatus.EXCLUDED
+        ]
         if not closed:
             return {"total_trades": 0, "win_rate": 0, "avg_pnl": 0, "total_pnl": 0,
                     "liquidations": 0}

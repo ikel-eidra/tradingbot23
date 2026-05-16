@@ -53,6 +53,34 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertLess(pos.sl_price, 100)
         self.assertLess(pos.liquidation_price, pos.sl_price)
 
+    def test_open_rejects_excluded_stablecoin_even_with_entry_price(self):
+        with patch.object(self.trader, "get_current_price", return_value=1.0) as price_mock:
+            pos = self.trader.open_position("USDG", margin_usd=100, entry_price=1.0)
+
+        self.assertIsNone(pos)
+        price_mock.assert_not_called()
+
+    def test_open_validates_binance_price_when_entry_price_is_supplied(self):
+        with patch.object(self.trader, "get_current_price", return_value=None):
+            pos = self.trader.open_position("NOTBINANCE", margin_usd=100, entry_price=1.0)
+
+        self.assertIsNone(pos)
+        self.assertEqual(self.trader.get_open_positions(), [])
+
+    def test_check_positions_closes_newly_excluded_open_position(self):
+        with patch.object(self.trader, "get_current_price", return_value=1.0):
+            pos = self.trader.open_position("BTC", margin_usd=100)
+        self.assertIsNotNone(pos)
+        pos.symbol = "USDG"
+
+        closed = self.trader.check_positions()
+
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(closed[0].status, FuturesPositionStatus.EXCLUDED)
+        self.assertEqual(self.trader.get_open_positions(), [])
+        saved = json.loads(_open_positions_json().read_text(encoding="utf-8"))
+        self.assertEqual(saved["positions"], [])
+
     def test_cross_margin_keeps_20x_small_trade_liquidation_far(self):
         config.LEVERAGE = 20
         config.CAPITAL_USD = 5000
