@@ -2294,18 +2294,47 @@ class Dashboard:
         self._s_per_trade = tk.StringVar(value=str(round(config.PER_TRADE_PCT * 100, 0)))
         row("Per trade (% of portfolio)", lambda p: field(p, self._s_per_trade, 8), 5)
 
+        # Maximum simultaneous futures trades
+        self._s_max_open_trades = tk.IntVar(value=config.MAX_OPEN_TRADES)
+        max_open_frame = tk.Frame(grid, bg="#0d1117")
+        max_open_frame.grid(row=6, column=1, sticky="w", padx=8, pady=4)
+        ttk.Label(grid, text="Max open trades", foreground="#8b949e", background="#0d1117",
+                  font=("Consolas", 9), width=22).grid(row=6, column=0, sticky="w", pady=4)
+        tk.Spinbox(
+            max_open_frame,
+            from_=1,
+            to=config.MAX_OPEN_TRADES_CAP,
+            textvariable=self._s_max_open_trades,
+            width=5,
+            font=("Consolas", 10),
+            bg="#f0f6fc",
+            fg="#0d1117",
+            buttonbackground="#c9d1d9",
+            insertbackground="#0d1117",
+            selectbackground="#58a6ff",
+            selectforeground="#0d1117",
+            relief="solid",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground="#8b949e",
+            highlightcolor="#58a6ff",
+        ).pack(side="left")
+        ttk.Label(max_open_frame, text=f"1-{config.MAX_OPEN_TRADES_CAP}",
+                  foreground="#8b949e", background="#0d1117",
+                  font=("Consolas", 9)).pack(side="left", padx=(6, 0))
+
         # Monthly contribution
         self._s_monthly_contribution = tk.StringVar(value=str(round(config.MONTHLY_CONTRIBUTION_USD, 2)))
-        row("Monthly contribution ($)", lambda p: field(p, self._s_monthly_contribution, 8), 6)
+        row("Monthly contribution ($)", lambda p: field(p, self._s_monthly_contribution, 8), 7)
 
         self._s_monthly_day = tk.StringVar(value=str(config.MONTHLY_CONTRIBUTION_DAY))
-        row("Contribution day", lambda p: field(p, self._s_monthly_day, 8), 7)
+        row("Contribution day", lambda p: field(p, self._s_monthly_day, 8), 8)
 
         self._s_auto_start = tk.BooleanVar(value=config.AUTO_START_FUTURES)
         auto_frame = tk.Frame(grid, bg="#0d1117")
-        auto_frame.grid(row=8, column=1, sticky="w", padx=8, pady=4)
+        auto_frame.grid(row=9, column=1, sticky="w", padx=8, pady=4)
         ttk.Label(grid, text="Auto-start futures", foreground="#8b949e", background="#0d1117",
-                  font=("Consolas", 9), width=22).grid(row=8, column=0, sticky="w", pady=4)
+                  font=("Consolas", 9), width=22).grid(row=9, column=0, sticky="w", pady=4)
         ttk.Checkbutton(auto_frame, text="Enable on launch", variable=self._s_auto_start).pack(side="left")
 
         # Apply button
@@ -2360,6 +2389,7 @@ class Dashboard:
             sl_pct    = float(self._s_sl.get()) / 100
             hold_days = int(self._s_hold.get())
             per_trade = float(self._s_per_trade.get()) / 100
+            max_open_trades = int(self._s_max_open_trades.get())
             monthly_contribution = float(self._s_monthly_contribution.get())
             monthly_day = int(self._s_monthly_day.get())
             auto_start = self._s_auto_start.get()
@@ -2374,6 +2404,9 @@ class Dashboard:
         self._s_leverage.set(leverage)
         if monthly_contribution < 0:
             self._s_status.set("Error: monthly contribution cannot be negative")
+            return
+        if not 1 <= max_open_trades <= config.MAX_OPEN_TRADES_CAP:
+            self._s_status.set(f"Error: max open trades must be 1-{config.MAX_OPEN_TRADES_CAP}")
             return
         if not 1 <= monthly_day <= 31:
             self._s_status.set("Error: contribution day must be 1-31")
@@ -2399,6 +2432,7 @@ class Dashboard:
             "FUTURES_USE_SL":     "true" if sl_on else "false",
             "MAX_HOLD_DAYS":      hold_days,
             "PER_TRADE_PCT":      per_trade,
+            "MAX_OPEN_TRADES":    max_open_trades,
             "MONTHLY_CONTRIBUTION_USD": monthly_contribution,
             "MONTHLY_CONTRIBUTION_DAY": monthly_day,
             "AUTO_START_FUTURES": "true" if auto_start else "false",
@@ -2413,11 +2447,18 @@ class Dashboard:
         config.FUTURES_USE_SL     = sl_on
         config.MAX_HOLD_DAYS      = hold_days
         config.PER_TRADE_PCT      = per_trade
+        old_max_open_trades = config.MAX_OPEN_TRADES
+        config.MAX_OPEN_TRADES    = max_open_trades
+        config.TOP_N_LOSERS       = max(config.TOP_N_LOSERS, config.MAX_OPEN_TRADES)
         config.MONTHLY_CONTRIBUTION_USD = monthly_contribution
         config.MONTHLY_CONTRIBUTION_DAY = monthly_day
         config.AUTO_START_FUTURES = auto_start
         config.SETTINGS_CONFIRMED = True
         self._settings_confirmed = True
+        if max_open_trades != old_max_open_trades:
+            self.strategy.basket = []
+            self.strategy.basket_month = None
+            self.strategy.basket_year = None
         applied_capital_delta = self.trader.sync_starting_capital(capital)
         self.trader.leverage      = leverage
         self.engine_var.set(self._new_trade_setting_text())
@@ -2427,15 +2468,16 @@ class Dashboard:
             sign = "+" if applied_capital_delta > 0 else "-"
             capital_note = f"  |  Cash {sign}${abs(applied_capital_delta):,.2f}"
         self._s_status.set(
-            f"Applied!  Leverage: {leverage}x  |  TP: {tp_pct*100:.2f}%  |  "
-            f"SL: {'ON' if sl_on else 'OFF'}  |  Add ${monthly_contribution:.2f}/mo"
+            f"Applied!  Leverage: {leverage}x  |  Max open: {max_open_trades}  |  "
+            f"TP: {tp_pct*100:.2f}%  |  SL: {'ON' if sl_on else 'OFF'}  |  "
+            f"Add ${monthly_contribution:.2f}/mo"
             f"{capital_note}")
         self._refresh_summary()
         self._update_contribution_schedule()
 
     @staticmethod
     def _new_trade_setting_text() -> str:
-        return f"   NEW TRADES: FUTURES {config.LEVERAGE}x"
+        return f"   NEW TRADES: FUTURES {config.LEVERAGE}x / MAX {config.MAX_OPEN_TRADES}"
 
     @staticmethod
     def _num(value, default: float = 0.0) -> float:

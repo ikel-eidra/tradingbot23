@@ -21,6 +21,7 @@ class TestStrategy(unittest.TestCase):
         config.MONTHLY_CONTRIBUTION_USD = 0
         config.TOP_N_COINS = 50
         config.TOP_N_LOSERS = 5
+        config.MAX_OPEN_TRADES = 5
 
     def test_execute_signals_respects_max_open_slots(self):
         """Should not open more positions than the configured basket slots."""
@@ -45,7 +46,35 @@ class TestStrategy(unittest.TestCase):
         ])
 
         self.assertEqual(len(opened), 1)
-        self.assertEqual(len(trader.get_open_positions()), config.TOP_N_LOSERS)
+        self.assertEqual(len(trader.get_open_positions()), config.MAX_OPEN_TRADES)
+
+    def test_execute_signals_respects_max_open_trades_separate_from_basket_size(self):
+        """Open slots are controlled by MAX_OPEN_TRADES, not monthly basket size."""
+
+        config.TOP_N_LOSERS = 10
+        config.MAX_OPEN_TRADES = 1
+
+        class FakeTrader:
+            def __init__(self):
+                self.positions = []
+
+            def get_open_positions(self):
+                return list(self.positions)
+
+            def open_position(self, symbol, entry_price=None, entry_change_24h=0.0):
+                pos = SimpleNamespace(symbol=symbol)
+                self.positions.append(pos)
+                return pos
+
+        trader = FakeTrader()
+        strategy = Strategy(trader=trader)
+        opened = strategy.execute_signals([
+            {"symbol": "AAA", "cmc_rank": 10, "current_price": 1.0, "change_24h": -3.0},
+            {"symbol": "BBB", "cmc_rank": 11, "current_price": 1.0, "change_24h": -4.0},
+        ])
+
+        self.assertEqual([p.symbol for p in opened], ["AAA"])
+        self.assertEqual(len(trader.get_open_positions()), 1)
 
     def test_execute_signals_skips_outside_top_50(self):
         """Signals without a valid top-50 rank should never open positions."""
@@ -132,6 +161,47 @@ class TestStrategy(unittest.TestCase):
 
         self.assertEqual([p.symbol for p in opened], ["GOOD"])
         self.assertEqual([p.symbol for p in trader.get_open_positions()], ["GOOD"])
+
+    def test_fill_empty_slots_uses_max_open_trades_limit(self):
+        """Slot filling stops at MAX_OPEN_TRADES even when the basket is larger."""
+
+        config.TOP_N_LOSERS = 10
+        config.MAX_OPEN_TRADES = 2
+
+        class FakeFetcher:
+            def get_top_coins(self):
+                return [
+                    {"symbol": "AAA", "cmc_rank": 10, "price": 1.0, "percent_change_24h": -6.0},
+                    {"symbol": "BBB", "cmc_rank": 11, "price": 2.0, "percent_change_24h": -5.0},
+                    {"symbol": "CCC", "cmc_rank": 12, "price": 3.0, "percent_change_24h": -4.0},
+                ]
+
+        class FakeTrader:
+            cash_balance = 1000
+
+            def __init__(self):
+                self.positions = []
+
+            def get_open_positions(self):
+                return list(self.positions)
+
+            def open_position(self, symbol, entry_price=None, entry_change_24h=0.0):
+                pos = SimpleNamespace(symbol=symbol)
+                self.positions.append(pos)
+                return pos
+
+        trader = FakeTrader()
+        strategy = Strategy(fetcher=FakeFetcher(), trader=trader)
+        strategy.basket = [
+            {"symbol": "AAA", "cmc_rank": 10},
+            {"symbol": "BBB", "cmc_rank": 11},
+            {"symbol": "CCC", "cmc_rank": 12},
+        ]
+
+        opened = strategy.fill_empty_slots()
+
+        self.assertEqual([p.symbol for p in opened], ["AAA", "BBB"])
+        self.assertEqual(len(trader.get_open_positions()), 2)
 
     def test_fill_empty_slots_skips_excluded_symbols_from_stale_basket(self):
         """A stale basket containing a newly excluded stablecoin should not refill it."""

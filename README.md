@@ -131,7 +131,8 @@ All settings live in `.env`. The Settings tab in the GUI lets you change most of
 | `CAPITAL_USD` | `500` | Starting paper capital in USD |
 | `LEVERAGE` | `1` | 1x–20x paper setting. 1x is the lowest-risk futures setting |
 | `TOP_N_COINS` | `50` | Market cap universe (top 50 recommended) |
-| `TOP_N_LOSERS` | `5` | Basket size (max simultaneous positions) |
+| `TOP_N_LOSERS` | `5` | Monthly loser basket size; automatically expands if `MAX_OPEN_TRADES` is higher |
+| `MAX_OPEN_TRADES` | `5` | Max simultaneous futures paper positions, capped at 1–10 |
 | `PER_TRADE_PCT` | `0.20` | 20% of portfolio per trade |
 | `MONTHLY_CONTRIBUTION_USD` | `0` | Paper cash added once per month; set `100` to simulate adding $100/month |
 | `MONTHLY_CONTRIBUTION_DAY` | `1` | Day of month to apply the paper contribution |

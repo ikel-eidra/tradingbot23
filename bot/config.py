@@ -62,6 +62,15 @@ BTC_REGIME_FILTER_PCT = float(_BTC_FILTER) if _BTC_FILTER and _BTC_FILTER.lower(
 # --- Coin Selection ---
 TOP_N_COINS = int(os.getenv("TOP_N_COINS", "50"))
 TOP_N_LOSERS = int(os.getenv("TOP_N_LOSERS", "5"))
+MAX_OPEN_TRADES_CAP = 10
+MAX_OPEN_TRADES = max(
+    1,
+    min(
+        MAX_OPEN_TRADES_CAP,
+        int(os.getenv("MAX_OPEN_TRADES", str(TOP_N_LOSERS))),
+    ),
+)
+TOP_N_LOSERS = max(TOP_N_LOSERS, MAX_OPEN_TRADES)
 MIN_VOLUME_USD = float(os.getenv("MIN_VOLUME_USD", "50000000"))  # $50M
 SNAPSHOT_DAY = int(os.getenv("SNAPSHOT_DAY", "1"))  # Day of month
 

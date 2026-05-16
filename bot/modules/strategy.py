@@ -248,7 +248,7 @@ class Strategy:
                 continue
 
             open_positions = self.trader.get_open_positions()
-            if len(open_positions) >= config.TOP_N_LOSERS:
+            if len(open_positions) >= config.MAX_OPEN_TRADES:
                 logger.debug("Skipping %s — max open position slots reached", symbol)
                 break
 
@@ -278,7 +278,7 @@ class Strategy:
 
         open_positions = self.trader.get_open_positions()
         open_symbols   = {p.symbol for p in open_positions}
-        slots          = config.TOP_N_LOSERS - len(open_positions)
+        slots          = config.MAX_OPEN_TRADES - len(open_positions)
         if slots <= 0 or self.trader.cash_balance < 10:
             return []
 
