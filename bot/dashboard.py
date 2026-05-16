@@ -40,6 +40,118 @@ from bot.modules.p2p_monitor import P2PMonitor, P2PSnapshot
 logger = logging.getLogger(__name__)
 
 
+class ToolTip:
+    """Small hover tooltip for tkinter/ttk controls."""
+
+    def __init__(self, widget, text: str, delay_ms: int = 550, wraplength: int = 420):
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self.wraplength = wraplength
+        self._after_id = None
+        self._window = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.delay_ms, self._show)
+
+    def _cancel(self):
+        if self._after_id:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        self._after_id = None
+        if self._window or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 18
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+        except tk.TclError:
+            return
+
+        self._window = tk.Toplevel(self.widget)
+        self._window.wm_overrideredirect(True)
+        self._window.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(
+            self._window,
+            text=self.text,
+            justify="left",
+            bg="#21262d",
+            fg="#f0f6fc",
+            relief="solid",
+            bd=1,
+            padx=9,
+            pady=7,
+            wraplength=self.wraplength,
+            font=("Consolas", 9),
+        )
+        label.pack()
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._window:
+            try:
+                self._window.destroy()
+            except tk.TclError:
+                pass
+            self._window = None
+
+
+SETTINGS_HELP = {
+    "Capital (USD)": "Starting paper capital for futures. Increasing adds free paper cash. Decreasing withdraws from free cash only; open trades keep their original margin.",
+    "Leverage": "Leverage used for new futures paper trades only. Higher leverage magnifies both profit and drawdown. Existing trades keep their entry leverage.",
+    "TP target (% net)": "Net take-profit target on margin after estimated fees and funding. The app calculates the required price move for each new trade.",
+    "Stop Loss": "Optional hard stop-loss. When disabled, positions rely on TP, max-hold expiry, crash protection, and cross-margin tracking.",
+    "Max hold (days)": "Maximum age of a futures paper position before it is closed at market in the simulation.",
+    "Per trade (% of portfolio)": "Margin size for each new trade as a percent of current paper portfolio value. This is margin, not leveraged notional.",
+    "Max open trades": "Maximum simultaneous futures paper positions. Lowering this does not force-close existing trades; it only blocks new entries until open count drops.",
+    "Pre-trade wave check": "Before opening a futures trade, inspect the coin's recent 15m candles to avoid entries still making fresh lows.",
+    "Min pre-trade score": "Minimum 0-100 wave score required before entry. Higher is stricter and opens fewer trades.",
+    "Monthly contribution ($)": "Paper cash to add once per month for contribution/compounding simulation.",
+    "Contribution day": "Calendar day of month when the paper contribution is applied. If the month is shorter, the app uses the last valid day.",
+    "Auto-start futures": "When enabled, futures scanning resumes automatically on app launch after settings are confirmed.",
+}
+
+RISK_HELP = {
+    "Profile": "Local data profile name. Different profiles use separate data folders after restart, useful for beta testers.",
+    "Max daily loss $": "Risk guard. Zero disables it. If today's closed futures P&L falls below this loss, new entries are blocked.",
+    "Max open notional $": "Risk guard. Zero disables it. Blocks new entries once leveraged open notional reaches this dollar limit.",
+    "Max loss streak": "Risk guard. Zero disables it. Blocks new entries after this many consecutive losing closed futures trades.",
+    "P2P max route PHP": "Per-cycle cap for P2P paper/live-assist route sizing. Zero means use the capital value from the P2P tab.",
+    "P2P delay min": "Assumed manual P2P settlement time. It adds a small realism haircut and also acts as Auto Cycle cooldown.",
+    "P2P cancel %": "Simulated failed/cancelled P2P order rate. It deducts a small expected cost from paper route profit.",
+    "P2P decay %": "Spread-fade haircut. Example: 0.05% on 500,000 PHP deducts 250 PHP from expected route profit.",
+}
+
+P2P_FIELD_HELP = {
+    "Capital PHP": "Paper capital or route size basis for USDT/PHP P2P calculations. Paper mode compounds realized profit into this account.",
+    "Min net %": "Minimum net profit percent required after buffer, transfer fee, delay, cancel, and decay haircuts.",
+    "Xfer fee USDT": "Simulated crypto transfer/network fee when buying and selling across different marketplaces.",
+    "Buffer PHP": "Fixed peso safety cost deducted from every route. Use this for hidden fees, payment friction, or manual execution error.",
+    "Delay min": "Assumed time to complete the manual P2P cycle. It adds realism drag and sets Auto Cycle cooldown.",
+    "Cancel %": "Expected cancelled/failed order rate. Higher values make paper results more conservative.",
+    "Decay %": "Spread-fade haircut. It models the chance that the buy/sell spread shrinks while you execute manually.",
+}
+
+P2P_SUMMARY_HELP = {
+    "BEST BUY USDT": "Lowest seller price available to buy USDT using PHP from the loaded P2P listings.",
+    "BEST SELL USDT": "Highest buyer price available to sell USDT for PHP from the loaded P2P listings.",
+    "TOP NET PROFIT": "Best single route profit after configured costs and realism haircuts.",
+    "DEPTH SWEEP": "Estimated result if the app tries to use the full configured capital across available order depth.",
+    "PAPER BAL": "Total P2P paper equity: free PHP cash plus any open hold inventory at cost.",
+    "CYCLES": "Completed paper buy+sell cycles and realized PHP profit from those cycles.",
+    "HOLD USDT": "Paper USDT inventory currently held from Paper Buy Hold.",
+    "HOLD P&L": "Estimated mark-to-market profit/loss if the held USDT were sold into current buyer listings.",
+}
+
+
 class Dashboard:
     REFRESH_MS = 2000
     P2P_REFRESH_SECS = 60
@@ -102,6 +214,14 @@ class Dashboard:
         self._schedule_refresh()
 
     # ── UI construction ────────────────────────────────────────────────────────
+
+    def _tip(self, widget, text: str):
+        tip = ToolTip(widget, text)
+        try:
+            widget._tradingbot_tooltip = tip
+        except Exception:
+            pass
+        return widget
 
     def _build_ui(self):
         self.root.configure(bg="#0d1117")
@@ -187,8 +307,12 @@ class Dashboard:
         self.pause_btn = ttk.Button(ctrl, text=pause_text,    style="Btn.TButton", command=self._on_pause_resume)
         self.run_btn.pack(side="left", padx=(0, 6))
         self.pause_btn.pack(side="left", padx=(0, 12))
-        ttk.Button(ctrl, text="Telegram Menu", style="Btn.TButton",
-                   command=self._send_telegram_menu).pack(side="left", padx=(0, 12))
+        self._tip(self.run_btn, "Run one futures scan immediately: check exits first, then scan for eligible entries if risk guards allow.")
+        self._tip(self.pause_btn, "Pause blocks new futures cycles. Resume allows the loop to scan again if Settings and Risk checks pass.")
+        tg_menu_btn = ttk.Button(ctrl, text="Telegram Menu", style="Btn.TButton",
+                                 command=self._send_telegram_menu)
+        tg_menu_btn.pack(side="left", padx=(0, 12))
+        self._tip(tg_menu_btn, "Send the Telegram dashboard/menu buttons to your configured bot chat.")
 
         if not self._settings_confirmed:
             initial_status = "First run: review Settings and click Apply Settings before trading."
@@ -210,6 +334,14 @@ class Dashboard:
         self.trades_var    = tk.StringVar(value="0")
         self.winrate_var   = tk.StringVar(value="0.0%")
         self.open_var      = tk.StringVar(value="0")
+        stats_help = {
+            "PORTFOLIO": "Estimated futures paper equity: free cash plus current marked value of open positions.",
+            "CASH": "Free paper cash/margin available for new futures trades.",
+            "PNL": "Portfolio performance versus contributed futures paper capital, including unrealized open P&L.",
+            "OPEN": "Number of currently open futures paper positions.",
+            "TRADES": "Closed futures paper trades in the active session/history.",
+            "WIN RATE": "Percent of closed futures trades with positive net P&L. Open losing trades are not counted until closed.",
+        }
 
         for label_text, var, sty in [
             ("PORTFOLIO", self.portfolio_var, "Big.TLabel"),
@@ -222,9 +354,15 @@ class Dashboard:
             card = tk.Frame(stats_frame, bg="#161b22",
                             highlightbackground="#30363d", highlightthickness=1)
             card.pack(side="left", padx=4, ipadx=12, ipady=6, fill="y")
-            ttk.Label(card, text=label_text, foreground="#8b949e", background="#161b22",
-                      font=("Consolas", 8)).pack(anchor="w")
-            ttk.Label(card, textvariable=var, style=sty, background="#161b22").pack(anchor="w")
+            label = ttk.Label(card, text=label_text, foreground="#8b949e", background="#161b22",
+                              font=("Consolas", 8))
+            label.pack(anchor="w")
+            value = ttk.Label(card, textvariable=var, style=sty, background="#161b22")
+            value.pack(anchor="w")
+            help_text = stats_help.get(label_text, "")
+            self._tip(card, help_text)
+            self._tip(label, help_text)
+            self._tip(value, help_text)
 
         # ── Notebook ──
         nb = ttk.Notebook(self.root)
@@ -534,12 +672,18 @@ class Dashboard:
         top.pack(fill="x", pady=(0, 8))
         ttk.Label(top, text="PROFESSIONAL CONTROL CENTER", style="Header.TLabel",
                   background="#0d1117").pack(side="left")
-        ttk.Button(top, text="Refresh", style="Btn.TButton",
-                   command=self._refresh_risk_tab).pack(side="right")
-        ttk.Button(top, text="Export Ops Report", style="Btn.TButton",
-                   command=self._export_ops_report).pack(side="right", padx=(0, 6))
-        ttk.Button(top, text="Run 5Y Rebound", style="Btn.TButton",
-                   command=self._run_rebound_study).pack(side="right", padx=(0, 6))
+        risk_refresh_btn = ttk.Button(top, text="Refresh", style="Btn.TButton",
+                                      command=self._refresh_risk_tab)
+        risk_refresh_btn.pack(side="right")
+        self._tip(risk_refresh_btn, "Refresh the risk metrics, control state, and decision log.")
+        export_btn = ttk.Button(top, text="Export Ops Report", style="Btn.TButton",
+                                command=self._export_ops_report)
+        export_btn.pack(side="right", padx=(0, 6))
+        self._tip(export_btn, "Write a local operations report with futures, P2P, risk, and decision-log snapshots.")
+        rebound_btn = ttk.Button(top, text="Run 5Y Rebound", style="Btn.TButton",
+                                 command=self._run_rebound_study)
+        rebound_btn.pack(side="right", padx=(0, 6))
+        self._tip(rebound_btn, "Run the historical rebound-duration study for the top-50 universe in the background.")
 
         self._risk_summary_var = tk.StringVar(value="")
         ttk.Label(body, textvariable=self._risk_summary_var,
@@ -588,20 +732,33 @@ class Dashboard:
         ]:
             group = tk.Frame(controls, bg="#0d1117")
             group.pack(side="left", padx=(0, 10))
-            ttk.Label(group, text=label_text, foreground="#8b949e", background="#0d1117",
-                      font=("Consolas", 8)).pack(anchor="w")
-            entry(group, var, width).pack(anchor="w")
+            label = ttk.Label(group, text=label_text, foreground="#8b949e", background="#0d1117",
+                              font=("Consolas", 8))
+            label.pack(anchor="w")
+            input_widget = entry(group, var, width)
+            input_widget.pack(anchor="w")
+            help_text = RISK_HELP.get(label_text, "")
+            self._tip(label, help_text)
+            self._tip(input_widget, help_text)
 
         btns = tk.Frame(body, bg="#0d1117")
         btns.pack(fill="x", pady=(0, 10))
-        ttk.Button(btns, text="Apply Risk", style="Btn.TButton",
-                   command=self._apply_risk_settings).pack(side="left", padx=(0, 6))
-        ttk.Button(btns, text="Kill Switch", style="Btn.TButton",
-                   command=self._risk_kill).pack(side="left", padx=(0, 6))
-        ttk.Button(btns, text="Clear Kill", style="Btn.TButton",
-                   command=self._risk_clear_kill).pack(side="left", padx=(0, 6))
-        ttk.Button(btns, text="Resume If Allowed", style="Btn.TButton",
-                   command=self._risk_resume).pack(side="left", padx=(0, 6))
+        apply_risk_btn = ttk.Button(btns, text="Apply Risk", style="Btn.TButton",
+                                    command=self._apply_risk_settings)
+        apply_risk_btn.pack(side="left", padx=(0, 6))
+        self._tip(apply_risk_btn, "Save and apply risk settings. Profile changes require restart because they change the data folder.")
+        kill_btn = ttk.Button(btns, text="Kill Switch", style="Btn.TButton",
+                              command=self._risk_kill)
+        kill_btn.pack(side="left", padx=(0, 6))
+        self._tip(kill_btn, "Immediately block new futures entries. Existing positions are still monitored for exits.")
+        clear_kill_btn = ttk.Button(btns, text="Clear Kill", style="Btn.TButton",
+                                    command=self._risk_clear_kill)
+        clear_kill_btn.pack(side="left", padx=(0, 6))
+        self._tip(clear_kill_btn, "Clear the manual kill switch. Other risk guards may still block trading.")
+        resume_allowed_btn = ttk.Button(btns, text="Resume If Allowed", style="Btn.TButton",
+                                        command=self._risk_resume)
+        resume_allowed_btn.pack(side="left", padx=(0, 6))
+        self._tip(resume_allowed_btn, "Resume futures scanning only if all configured risk guards pass.")
         self._risk_action_var = tk.StringVar(value="")
         ttk.Label(btns, textvariable=self._risk_action_var,
                   foreground="#3fb950", background="#0d1117",
@@ -1066,10 +1223,14 @@ class Dashboard:
 
         ttk.Label(top, text="USDT/PHP P2P ASSIST", style="Header.TLabel",
                   background="#0d1117").pack(side="left")
-        ttk.Button(top, text="Refresh Prices", style="Btn.TButton",
-                   command=self._refresh_p2p).pack(side="right")
-        ttk.Button(top, text="P2P Guide", style="Btn.TButton",
-                   command=self._show_p2p_guide).pack(side="right", padx=(0, 6))
+        p2p_refresh_btn = ttk.Button(top, text="Refresh Prices", style="Btn.TButton",
+                                     command=self._refresh_p2p)
+        p2p_refresh_btn.pack(side="right")
+        self._tip(p2p_refresh_btn, "Reload live Binance P2P USDT/PHP listings and recalculate route estimates.")
+        p2p_guide_btn = ttk.Button(top, text="P2P Guide", style="Btn.TButton",
+                                   command=self._show_p2p_guide)
+        p2p_guide_btn.pack(side="right", padx=(0, 6))
+        self._tip(p2p_guide_btn, "Open a longer explanation of P2P modes, buttons, and automation scope.")
 
         controls = tk.Frame(body, bg="#0d1117")
         controls.pack(fill="x", pady=(0, 4))
@@ -1103,9 +1264,10 @@ class Dashboard:
         ]:
             group = tk.Frame(controls, bg="#0d1117")
             group.pack(side="left", padx=(0, 8))
-            ttk.Label(group, text=label_text, foreground="#8b949e", background="#0d1117",
-                      font=("Consolas", 8)).pack(anchor="w")
-            tk.Entry(
+            label = ttk.Label(group, text=label_text, foreground="#8b949e", background="#0d1117",
+                              font=("Consolas", 8))
+            label.pack(anchor="w")
+            entry_widget = tk.Entry(
                 group,
                 textvariable=var,
                 width=width,
@@ -1120,12 +1282,16 @@ class Dashboard:
                 highlightthickness=1,
                 highlightbackground="#8b949e",
                 highlightcolor="#58a6ff",
-            ).pack(anchor="w")
+            )
+            entry_widget.pack(anchor="w")
+            help_text = P2P_FIELD_HELP.get(label_text, "")
+            self._tip(label, help_text)
+            self._tip(entry_widget, help_text)
 
         mode_group = tk.Frame(controls, bg="#0d1117")
         mode_group.pack(side="left", padx=(0, 10), pady=(10, 0))
         for value, text in [("paper", "Paper Sim (Live Data)"), ("live", "Live Assist")]:
-            tk.Radiobutton(
+            rb = tk.Radiobutton(
                 mode_group,
                 text=text,
                 value=value,
@@ -1137,61 +1303,89 @@ class Dashboard:
                 activebackground="#0d1117",
                 activeforeground="#58a6ff",
                 font=("Consolas", 9),
-            ).pack(side="left", padx=(0, 8))
+            )
+            rb.pack(side="left", padx=(0, 8))
+            self._tip(
+                rb,
+                "Paper Sim uses live listings but writes only paper transactions."
+                if value == "paper"
+                else "Live Assist scans, scores, logs, and alerts only. Fiat payment and release remain manual.",
+            )
 
-        ttk.Button(controls, text="Recalculate Only", style="Btn.TButton",
-                   command=self._recalculate_p2p_routes).pack(side="left", padx=(0, 10), pady=(10, 0))
+        recalc_btn = ttk.Button(controls, text="Recalculate Only", style="Btn.TButton",
+                                command=self._recalculate_p2p_routes)
+        recalc_btn.pack(side="left", padx=(0, 10), pady=(10, 0))
+        self._tip(recalc_btn, "Recalculate route estimates from the current live listings. It does not create a paper transaction.")
 
         action_bar = tk.Frame(body, bg="#0d1117")
         action_bar.pack(fill="x", pady=(0, 4))
 
         self._p2p_paper_actions = tk.Frame(action_bar, bg="#0d1117")
-        ttk.Button(self._p2p_paper_actions, text="Paper Buy+Sell", style="Btn.TButton",
-                   command=self._paper_cycle_now).pack(side="left", padx=(0, 6))
-        ttk.Button(self._p2p_paper_actions, text="Paper Buy Hold", style="Btn.TButton",
-                   command=self._paper_hold_buy_now).pack(side="left", padx=(0, 6))
-        ttk.Button(self._p2p_paper_actions, text="Check/Sell Hold", style="Btn.TButton",
-                   command=self._check_p2p_hold_sell).pack(side="left", padx=(0, 6))
-        ttk.Button(self._p2p_paper_actions, text="Reset Paper", style="Btn.TButton",
-                   command=self._reset_p2p_paper).pack(side="left", padx=(0, 6))
-        ttk.Button(self._p2p_paper_actions, text="Send TG", style="Btn.TButton",
-                   command=self._send_p2p_live_snapshot).pack(side="left", padx=(0, 12))
+        paper_cycle_btn = ttk.Button(self._p2p_paper_actions, text="Paper Buy+Sell", style="Btn.TButton",
+                                     command=self._paper_cycle_now)
+        paper_cycle_btn.pack(side="left", padx=(0, 6))
+        self._tip(paper_cycle_btn, "Instant paper cycle: buy paper USDT and sell it immediately if the current route passes filters.")
+        paper_hold_btn = ttk.Button(self._p2p_paper_actions, text="Paper Buy Hold", style="Btn.TButton",
+                                    command=self._paper_hold_buy_now)
+        paper_hold_btn.pack(side="left", padx=(0, 6))
+        self._tip(paper_hold_btn, "Open a paper USDT inventory hold, then wait for a better sell price before closing.")
+        check_hold_btn = ttk.Button(self._p2p_paper_actions, text="Check/Sell Hold", style="Btn.TButton",
+                                    command=self._check_p2p_hold_sell)
+        check_hold_btn.pack(side="left", padx=(0, 6))
+        self._tip(check_hold_btn, "Check the open paper hold against current buyer listings. It sells only when target profit is met.")
+        reset_paper_btn = ttk.Button(self._p2p_paper_actions, text="Reset Paper", style="Btn.TButton",
+                                     command=self._reset_p2p_paper)
+        reset_paper_btn.pack(side="left", padx=(0, 6))
+        self._tip(reset_paper_btn, "Archive the current P2P paper session/history and start a fresh paper balance.")
+        send_tg_btn = ttk.Button(self._p2p_paper_actions, text="Send TG", style="Btn.TButton",
+                                 command=self._send_p2p_live_snapshot)
+        send_tg_btn.pack(side="left", padx=(0, 12))
+        self._tip(send_tg_btn, "Send the current P2P snapshot and paper summary to Telegram.")
         self._p2p_paper_alert = self._p2p_checkbutton(
             self._p2p_paper_actions,
             text="TG Alerts",
             variable=self._p2p_auto_alert,
         )
         self._p2p_paper_alert.pack(side="left", padx=(0, 10))
+        self._tip(self._p2p_paper_alert, "Send Telegram alerts for P2P paper events and snapshots.")
         self._p2p_paper_auto = self._p2p_checkbutton(
             self._p2p_paper_actions,
             text="Auto Cycle",
             variable=self._p2p_auto_paper,
         )
         self._p2p_paper_auto.pack(side="left", padx=(0, 10))
+        self._tip(self._p2p_paper_auto, "On refresh, auto-run Paper Buy+Sell only when a profitable route passes filters, no hold is open, and cooldown is satisfied.")
         self._p2p_hold_auto = self._p2p_checkbutton(
             self._p2p_paper_actions,
             text="Auto Hold Sell",
             variable=self._p2p_auto_hold_sell,
         )
         self._p2p_hold_auto.pack(side="left")
+        self._tip(self._p2p_hold_auto, "On refresh, automatically check the open hold and sell only when target profit is met.")
 
         self._p2p_live_actions = tk.Frame(action_bar, bg="#0d1117")
-        ttk.Button(self._p2p_live_actions, text="Send Live Snapshot", style="Btn.TButton",
-                   command=self._send_p2p_live_snapshot).pack(side="left", padx=(0, 6))
-        ttk.Button(self._p2p_live_actions, text="Log Watch Route", style="Btn.TButton",
-                   command=self._log_top_p2p_route).pack(side="left", padx=(0, 12))
+        live_snapshot_btn = ttk.Button(self._p2p_live_actions, text="Send Live Snapshot", style="Btn.TButton",
+                                       command=self._send_p2p_live_snapshot)
+        live_snapshot_btn.pack(side="left", padx=(0, 6))
+        self._tip(live_snapshot_btn, "Send the current live-assist route snapshot to Telegram. No trade is executed.")
+        live_log_btn = ttk.Button(self._p2p_live_actions, text="Log Watch Route", style="Btn.TButton",
+                                  command=self._log_top_p2p_route)
+        live_log_btn.pack(side="left", padx=(0, 12))
+        self._tip(live_log_btn, "Write the current best watch route to the local P2P journal for later review.")
         self._p2p_live_alert = self._p2p_checkbutton(
             self._p2p_live_actions,
             text="Telegram Alerts",
             variable=self._p2p_auto_alert,
         )
         self._p2p_live_alert.pack(side="left", padx=(0, 10))
+        self._tip(self._p2p_live_alert, "Send Telegram alerts for live-assist opportunities. No automatic P2P trading is performed.")
         self._p2p_live_log = self._p2p_checkbutton(
             self._p2p_live_actions,
             text="Auto Watch Log",
             variable=self._p2p_auto_log,
         )
         self._p2p_live_log.pack(side="left")
+        self._tip(self._p2p_live_log, "Automatically log the best live-assist watch route on refresh when it changes.")
 
         self._p2p_status_var = tk.StringVar(value="Open this tab or press Refresh to load prices.")
         ttk.Label(body, textvariable=self._p2p_status_var, foreground="#8b949e",
@@ -1224,10 +1418,16 @@ class Dashboard:
             card = tk.Frame(summary, bg="#161b22",
                             highlightbackground="#30363d", highlightthickness=1)
             card.pack(side="left", padx=(0, 5), ipadx=7, ipady=4)
-            ttk.Label(card, text=label_text, foreground="#8b949e", background="#161b22",
-                      font=("Consolas", 8)).pack(anchor="w")
-            ttk.Label(card, textvariable=var, foreground="#58a6ff", background="#161b22",
-                      font=("Consolas", 12, "bold")).pack(anchor="w")
+            label = ttk.Label(card, text=label_text, foreground="#8b949e", background="#161b22",
+                              font=("Consolas", 8))
+            label.pack(anchor="w")
+            value = ttk.Label(card, textvariable=var, foreground="#58a6ff", background="#161b22",
+                              font=("Consolas", 12, "bold"))
+            value.pack(anchor="w")
+            help_text = P2P_SUMMARY_HELP.get(label_text, "")
+            self._tip(card, help_text)
+            self._tip(label, help_text)
+            self._tip(value, help_text)
         self._refresh_p2p_paper_summary()
 
         route_section = tk.Frame(body, bg="#0d1117")
@@ -2232,10 +2432,14 @@ class Dashboard:
             )
 
         def row(label, widget_factory, r):
-            ttk.Label(grid, text=label, foreground="#8b949e", background="#0d1117",
-                      font=("Consolas", 9), width=22).grid(row=r, column=0, sticky="w", pady=4)
+            label_widget = ttk.Label(grid, text=label, foreground="#8b949e", background="#0d1117",
+                                     font=("Consolas", 9), width=22)
+            label_widget.grid(row=r, column=0, sticky="w", pady=4)
             w = widget_factory(grid)
             w.grid(row=r, column=1, sticky="w", padx=8, pady=4)
+            help_text = SETTINGS_HELP.get(label, "")
+            self._tip(label_widget, help_text)
+            self._tip(w, help_text)
             return w
 
         # Capital
@@ -2246,9 +2450,10 @@ class Dashboard:
         self._s_leverage = tk.IntVar(value=config.LEVERAGE)
         lev_frame = tk.Frame(grid, bg="#0d1117")
         lev_frame.grid(row=1, column=1, sticky="w", padx=8, pady=4)
-        ttk.Label(grid, text="Leverage", foreground="#8b949e", background="#0d1117",
-                  font=("Consolas", 9), width=22).grid(row=1, column=0, sticky="w", pady=4)
-        tk.Spinbox(
+        lev_label = ttk.Label(grid, text="Leverage", foreground="#8b949e", background="#0d1117",
+                              font=("Consolas", 9), width=22)
+        lev_label.grid(row=1, column=0, sticky="w", pady=4)
+        lev_spin = tk.Spinbox(
             lev_frame,
             from_=1,
             to=config.MAX_LEVERAGE,
@@ -2266,9 +2471,12 @@ class Dashboard:
             highlightthickness=1,
             highlightbackground="#8b949e",
             highlightcolor="#58a6ff",
-        ).pack(side="left")
+        )
+        lev_spin.pack(side="left")
         ttk.Label(lev_frame, text="x", foreground="#8b949e", background="#0d1117",
                   font=("Consolas", 9)).pack(side="left", padx=(6, 0))
+        self._tip(lev_label, SETTINGS_HELP["Leverage"])
+        self._tip(lev_spin, SETTINGS_HELP["Leverage"])
 
         # TP %
         self._s_tp = tk.StringVar(value=str(round(config.FUTURES_NET_TP_PCT * 100, 2)))
@@ -2279,12 +2487,18 @@ class Dashboard:
         self._s_sl = tk.StringVar(value=str(round(config.FUTURES_NET_SL_PCT * 100, 2)))
         sl_frame = tk.Frame(grid, bg="#0d1117")
         sl_frame.grid(row=3, column=1, sticky="w", padx=8, pady=4)
-        ttk.Label(grid, text="Stop Loss", foreground="#8b949e", background="#0d1117",
-                  font=("Consolas", 9), width=22).grid(row=3, column=0, sticky="w", pady=4)
-        ttk.Checkbutton(sl_frame, text="Enable", variable=self._s_sl_enabled).pack(side="left")
-        field(sl_frame, self._s_sl, 8).pack(side="left", padx=8)
+        sl_label = ttk.Label(grid, text="Stop Loss", foreground="#8b949e", background="#0d1117",
+                             font=("Consolas", 9), width=22)
+        sl_label.grid(row=3, column=0, sticky="w", pady=4)
+        sl_check = ttk.Checkbutton(sl_frame, text="Enable", variable=self._s_sl_enabled)
+        sl_check.pack(side="left")
+        sl_input = field(sl_frame, self._s_sl, 8)
+        sl_input.pack(side="left", padx=8)
         ttk.Label(sl_frame, text="% net", foreground="#8b949e", background="#0d1117",
                   font=("Consolas",9)).pack(side="left")
+        self._tip(sl_label, SETTINGS_HELP["Stop Loss"])
+        self._tip(sl_check, SETTINGS_HELP["Stop Loss"])
+        self._tip(sl_input, SETTINGS_HELP["Stop Loss"])
 
         # Max hold days
         self._s_hold = tk.StringVar(value=str(config.MAX_HOLD_DAYS))
@@ -2298,9 +2512,10 @@ class Dashboard:
         self._s_max_open_trades = tk.IntVar(value=config.MAX_OPEN_TRADES)
         max_open_frame = tk.Frame(grid, bg="#0d1117")
         max_open_frame.grid(row=6, column=1, sticky="w", padx=8, pady=4)
-        ttk.Label(grid, text="Max open trades", foreground="#8b949e", background="#0d1117",
-                  font=("Consolas", 9), width=22).grid(row=6, column=0, sticky="w", pady=4)
-        tk.Spinbox(
+        max_open_label = ttk.Label(grid, text="Max open trades", foreground="#8b949e", background="#0d1117",
+                                   font=("Consolas", 9), width=22)
+        max_open_label.grid(row=6, column=0, sticky="w", pady=4)
+        max_open_spin = tk.Spinbox(
             max_open_frame,
             from_=1,
             to=config.MAX_OPEN_TRADES_CAP,
@@ -2318,18 +2533,25 @@ class Dashboard:
             highlightthickness=1,
             highlightbackground="#8b949e",
             highlightcolor="#58a6ff",
-        ).pack(side="left")
+        )
+        max_open_spin.pack(side="left")
         ttk.Label(max_open_frame, text=f"1-{config.MAX_OPEN_TRADES_CAP}",
                   foreground="#8b949e", background="#0d1117",
                   font=("Consolas", 9)).pack(side="left", padx=(6, 0))
+        self._tip(max_open_label, SETTINGS_HELP["Max open trades"])
+        self._tip(max_open_spin, SETTINGS_HELP["Max open trades"])
 
         # Pre-trade wave analysis
         self._s_pretrade_enabled = tk.BooleanVar(value=config.PRE_TRADE_ANALYSIS_ENABLED)
         pretrade_frame = tk.Frame(grid, bg="#0d1117")
         pretrade_frame.grid(row=7, column=1, sticky="w", padx=8, pady=4)
-        ttk.Label(grid, text="Pre-trade wave check", foreground="#8b949e", background="#0d1117",
-                  font=("Consolas", 9), width=22).grid(row=7, column=0, sticky="w", pady=4)
-        ttk.Checkbutton(pretrade_frame, text="Enable", variable=self._s_pretrade_enabled).pack(side="left")
+        pretrade_label = ttk.Label(grid, text="Pre-trade wave check", foreground="#8b949e", background="#0d1117",
+                                   font=("Consolas", 9), width=22)
+        pretrade_label.grid(row=7, column=0, sticky="w", pady=4)
+        pretrade_check = ttk.Checkbutton(pretrade_frame, text="Enable", variable=self._s_pretrade_enabled)
+        pretrade_check.pack(side="left")
+        self._tip(pretrade_label, SETTINGS_HELP["Pre-trade wave check"])
+        self._tip(pretrade_check, SETTINGS_HELP["Pre-trade wave check"])
 
         self._s_pretrade_score = tk.StringVar(value=str(round(config.PRE_TRADE_MIN_SCORE, 0)))
         row("Min pre-trade score", lambda p: field(p, self._s_pretrade_score, 8), 8)
@@ -2344,17 +2566,23 @@ class Dashboard:
         self._s_auto_start = tk.BooleanVar(value=config.AUTO_START_FUTURES)
         auto_frame = tk.Frame(grid, bg="#0d1117")
         auto_frame.grid(row=11, column=1, sticky="w", padx=8, pady=4)
-        ttk.Label(grid, text="Auto-start futures", foreground="#8b949e", background="#0d1117",
-                  font=("Consolas", 9), width=22).grid(row=11, column=0, sticky="w", pady=4)
-        ttk.Checkbutton(auto_frame, text="Enable on launch", variable=self._s_auto_start).pack(side="left")
+        auto_label = ttk.Label(grid, text="Auto-start futures", foreground="#8b949e", background="#0d1117",
+                               font=("Consolas", 9), width=22)
+        auto_label.grid(row=11, column=0, sticky="w", pady=4)
+        auto_check = ttk.Checkbutton(auto_frame, text="Enable on launch", variable=self._s_auto_start)
+        auto_check.pack(side="left")
+        self._tip(auto_label, SETTINGS_HELP["Auto-start futures"])
+        self._tip(auto_check, SETTINGS_HELP["Auto-start futures"])
 
         # Apply button
         setup_msg = "" if self._settings_confirmed else "First run: review these values, then click Apply Settings."
         self._s_status = tk.StringVar(value=setup_msg)
         bf = tk.Frame(settings_panel, bg="#0d1117")
         bf.pack(fill="x", pady=12)
-        ttk.Button(bf, text="Apply Settings", style="Btn.TButton",
-                   command=self._apply_settings).pack(side="left")
+        apply_settings_btn = ttk.Button(bf, text="Apply Settings", style="Btn.TButton",
+                                        command=self._apply_settings)
+        apply_settings_btn.pack(side="left")
+        self._tip(apply_settings_btn, "Save settings to .env and apply them to new futures trades. Open trades keep original leverage, margin, TP, and SL.")
         ttk.Label(bf, textvariable=self._s_status, foreground="#3fb950",
                   background="#0d1117", font=("Consolas", 9)).pack(side="left", padx=12)
 
