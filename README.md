@@ -215,6 +215,8 @@ TradingBot23 is futures-only by design. Spot support was removed because spot/OC
 
 The **P2P Arb** tab uses live Binance P2P USDT/PHP listings for both paper simulation and live monitoring. It pulls ads once when opened, then refreshes every 60 seconds while the tab is selected. The **P2P History** tab shows the paper transaction ledger and watch-route journal.
 
+P2P controls are durable. When valid P2P settings are used for refresh, recalculate, or paper actions, the app saves the current capital, min net %, transfer fee, buffer, delay, cancel %, decay %, mode, and automation toggles to `.env`, so refreshes and restarts keep the same control values.
+
 | Field | Detail |
 |---|---|
 | Best Buy USDT | Lowest seller price to buy USDT with PHP |

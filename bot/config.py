@@ -103,9 +103,20 @@ RISK_MAX_LOSS_STREAK = int(os.getenv("RISK_MAX_LOSS_STREAK", "0"))
 # --- P2P realism / sizing controls ---
 # Paper P2P still uses live listings, then applies these conservative buffers.
 P2P_MAX_ROUTE_PHP = float(os.getenv("P2P_MAX_ROUTE_PHP", "0"))
+P2P_DEFAULT_CAPITAL_PHP = float(os.getenv("P2P_DEFAULT_CAPITAL_PHP", "500000"))
+P2P_MIN_NET_PCT = float(os.getenv("P2P_MIN_NET_PCT", "0.10"))
+P2P_TRANSFER_FEE_USDT = float(os.getenv("P2P_TRANSFER_FEE_USDT", "1.0"))
+P2P_BUFFER_PHP = float(os.getenv("P2P_BUFFER_PHP", "0"))
 P2P_SETTLEMENT_DELAY_MINS = float(os.getenv("P2P_SETTLEMENT_DELAY_MINS", "20"))
 P2P_CANCEL_RATE_PCT = float(os.getenv("P2P_CANCEL_RATE_PCT", "2"))
 P2P_SPREAD_DECAY_PCT = float(os.getenv("P2P_SPREAD_DECAY_PCT", "0.03"))
+P2P_MODE = os.getenv("P2P_MODE", "paper").strip().lower()
+if P2P_MODE not in {"paper", "live"}:
+    P2P_MODE = "paper"
+P2P_TG_ALERTS = os.getenv("P2P_TG_ALERTS", "true").lower() == "true"
+P2P_AUTO_CYCLE = os.getenv("P2P_AUTO_CYCLE", "false").lower() == "true"
+P2P_AUTO_HOLD_SELL = os.getenv("P2P_AUTO_HOLD_SELL", "true").lower() == "true"
+P2P_AUTO_WATCH_LOG = os.getenv("P2P_AUTO_WATCH_LOG", "false").lower() == "true"
 
 # --- Engine selection ---
 # Futures-only. Spot trading is intentionally disabled; it needs two exchange

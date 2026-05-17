@@ -184,6 +184,7 @@ class Dashboard:
         self._p2p_last_logged_route_key = ""
         self._p2p_last_auto_cycle_key = ""
         self._p2p_last_auto_cycle_ts = 0.0
+        self._p2p_last_saved_controls: dict[str, str] = {}
         self._telegram_commands = None
         self._risk_kill_switch = False
         self._decision_log: list[dict[str, str]] = []
@@ -1236,22 +1237,25 @@ class Dashboard:
         controls.pack(fill="x", pady=(0, 4))
 
         saved_p2p_state = self.p2p_paper.state()
-        saved_p2p_capital = self._num(saved_p2p_state.get("starting_php"), 500_000)
+        saved_p2p_capital = self._num(
+            saved_p2p_state.get("starting_php"),
+            config.P2P_DEFAULT_CAPITAL_PHP,
+        )
         self._p2p_capital_php = tk.StringVar(value=f"{saved_p2p_capital:.0f}")
-        self._p2p_min_profit_pct = tk.StringVar(value="0.10")
-        self._p2p_transfer_fee_usdt = tk.StringVar(value="1.0")
-        self._p2p_buffer_php = tk.StringVar(value="0")
+        self._p2p_min_profit_pct = tk.StringVar(value=str(config.P2P_MIN_NET_PCT))
+        self._p2p_transfer_fee_usdt = tk.StringVar(value=str(config.P2P_TRANSFER_FEE_USDT))
+        self._p2p_buffer_php = tk.StringVar(value=str(config.P2P_BUFFER_PHP))
         if not hasattr(self, "_p2p_delay_mins"):
             self._p2p_delay_mins = tk.StringVar(value=str(config.P2P_SETTLEMENT_DELAY_MINS))
         if not hasattr(self, "_p2p_cancel_rate"):
             self._p2p_cancel_rate = tk.StringVar(value=str(config.P2P_CANCEL_RATE_PCT))
         if not hasattr(self, "_p2p_spread_decay"):
             self._p2p_spread_decay = tk.StringVar(value=str(config.P2P_SPREAD_DECAY_PCT))
-        self._p2p_auto_alert = tk.BooleanVar(value=True)
-        self._p2p_auto_log = tk.BooleanVar(value=False)
-        self._p2p_auto_paper = tk.BooleanVar(value=False)
-        self._p2p_auto_hold_sell = tk.BooleanVar(value=True)
-        self._p2p_mode = tk.StringVar(value="paper")
+        self._p2p_auto_alert = tk.BooleanVar(value=config.P2P_TG_ALERTS)
+        self._p2p_auto_log = tk.BooleanVar(value=config.P2P_AUTO_WATCH_LOG)
+        self._p2p_auto_paper = tk.BooleanVar(value=config.P2P_AUTO_CYCLE)
+        self._p2p_auto_hold_sell = tk.BooleanVar(value=config.P2P_AUTO_HOLD_SELL)
+        self._p2p_mode = tk.StringVar(value=config.P2P_MODE)
 
         for label_text, var, width in [
             ("Capital PHP", self._p2p_capital_php, 10),
@@ -1588,6 +1592,74 @@ class Dashboard:
             return "paper"
         return self._p2p_mode.get() or "paper"
 
+    @staticmethod
+    def _env_bool(value: bool) -> str:
+        return "true" if value else "false"
+
+    @staticmethod
+    def _env_number(value: float) -> str:
+        if abs(value - round(value)) < 0.0000001:
+            return str(int(round(value)))
+        return f"{value:.8f}".rstrip("0").rstrip(".")
+
+    def _p2p_control_updates(self, settings: P2PRouteSettings | None = None) -> dict[str, str] | None:
+        try:
+            capital = settings.capital_php if settings else float(self._p2p_capital_php.get())
+            min_pct = settings.min_profit_pct if settings else float(self._p2p_min_profit_pct.get())
+            transfer_fee = (
+                settings.cross_exchange_transfer_fee_usdt
+                if settings
+                else float(self._p2p_transfer_fee_usdt.get())
+            )
+            buffer_php = settings.local_buffer_php if settings else float(self._p2p_buffer_php.get())
+            delay = float(self._p2p_delay_mins.get())
+            cancel = float(self._p2p_cancel_rate.get())
+            decay = float(self._p2p_spread_decay.get())
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+        if min(capital, min_pct, transfer_fee, buffer_php, delay, cancel, decay) < 0:
+            return None
+
+        mode = self._p2p_current_mode()
+        if mode not in {"paper", "live"}:
+            mode = "paper"
+
+        return {
+            "P2P_DEFAULT_CAPITAL_PHP": self._env_number(capital),
+            "P2P_MIN_NET_PCT": self._env_number(min_pct),
+            "P2P_TRANSFER_FEE_USDT": self._env_number(transfer_fee),
+            "P2P_BUFFER_PHP": self._env_number(buffer_php),
+            "P2P_SETTLEMENT_DELAY_MINS": self._env_number(delay),
+            "P2P_CANCEL_RATE_PCT": self._env_number(cancel),
+            "P2P_SPREAD_DECAY_PCT": self._env_number(decay),
+            "P2P_MODE": mode,
+            "P2P_TG_ALERTS": self._env_bool(self._p2p_auto_alert.get()),
+            "P2P_AUTO_CYCLE": self._env_bool(self._p2p_auto_paper.get()),
+            "P2P_AUTO_HOLD_SELL": self._env_bool(self._p2p_auto_hold_sell.get()),
+            "P2P_AUTO_WATCH_LOG": self._env_bool(self._p2p_auto_log.get()),
+        }
+
+    def _persist_p2p_controls(self, settings: P2PRouteSettings | None = None) -> None:
+        updates = self._p2p_control_updates(settings)
+        if not updates or updates == self._p2p_last_saved_controls:
+            return
+        self._write_env(updates)
+        self._p2p_last_saved_controls = dict(updates)
+
+        config.P2P_DEFAULT_CAPITAL_PHP = float(updates["P2P_DEFAULT_CAPITAL_PHP"])
+        config.P2P_MIN_NET_PCT = float(updates["P2P_MIN_NET_PCT"])
+        config.P2P_TRANSFER_FEE_USDT = float(updates["P2P_TRANSFER_FEE_USDT"])
+        config.P2P_BUFFER_PHP = float(updates["P2P_BUFFER_PHP"])
+        config.P2P_SETTLEMENT_DELAY_MINS = float(updates["P2P_SETTLEMENT_DELAY_MINS"])
+        config.P2P_CANCEL_RATE_PCT = float(updates["P2P_CANCEL_RATE_PCT"])
+        config.P2P_SPREAD_DECAY_PCT = float(updates["P2P_SPREAD_DECAY_PCT"])
+        config.P2P_MODE = updates["P2P_MODE"]
+        config.P2P_TG_ALERTS = updates["P2P_TG_ALERTS"] == "true"
+        config.P2P_AUTO_CYCLE = updates["P2P_AUTO_CYCLE"] == "true"
+        config.P2P_AUTO_HOLD_SELL = updates["P2P_AUTO_HOLD_SELL"] == "true"
+        config.P2P_AUTO_WATCH_LOG = updates["P2P_AUTO_WATCH_LOG"] == "true"
+
     def _sync_p2p_mode_controls(self):
         if not hasattr(self, "_p2p_paper_actions") or not hasattr(self, "_p2p_live_actions"):
             return
@@ -1605,6 +1677,7 @@ class Dashboard:
                 self._p2p_status_var.set(
                     "Paper Sim uses live Binance P2P listings. Buy+Sell closes now; Buy Hold waits for target."
                 )
+        self._persist_p2p_controls()
 
     def _build_p2p_table(self, parent, title: str, height: int):
         section = tk.Frame(parent, bg="#0d1117")
@@ -1787,6 +1860,7 @@ class Dashboard:
             local_buffer_php=buffer_php,
         )
         self._p2p_settings_cache = settings
+        self._persist_p2p_controls(settings)
         return settings
 
     def _p2p_starting_capital_php(self) -> float:
