@@ -362,6 +362,44 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertGreater(loaded.pnl_usd, 0)
         self.assertLess(loaded.pnl_pct, 5.0)
 
+    def test_legacy_tp_history_is_repaired_to_configured_net_target(self):
+        now = datetime.now(timezone.utc)
+        earlier = now - timedelta(days=4)
+        row = {
+            "open_time": earlier.isoformat(),
+            "close_time": now.isoformat(),
+            "symbol": "XLM",
+            "engine": "futures",
+            "entry_price": "0.1498",
+            "exit_price": "0.15012207",
+            "amount_usd": "148.1111",
+            "notional": "2962.2216",
+            "leverage": "20",
+            "pnl_pct": "-0.4912",
+            "pnl_usd": "-0.7276",
+            "entry_fee": "1.77733299",
+            "exit_fee": "1.78115425",
+            "funding_paid": "3.5379",
+            "pnl_model": "net_includes_entry_fee",
+            "reason": "tp_hit",
+            "entry_change_24h": "-1.6422",
+        }
+        path = _history_csv()
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+            writer.writeheader()
+            writer.writerow(row)
+
+        repaired = FuturesTrader()
+        loaded = repaired.get_trade_history()[0]
+        with open(path, "r", newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+
+        self.assertEqual(loaded.status, FuturesPositionStatus.TP_HIT)
+        self.assertGreater(loaded.pnl_usd, 0)
+        self.assertAlmostEqual(loaded.pnl_pct, config.FUTURES_NET_TP_PCT * 100, delta=0.05)
+        self.assertGreater(float(rows[0]["exit_price"]), float(row["exit_price"]))
+
     def test_expiry(self):
         with patch.object(self.trader, "get_current_price", return_value=100.0):
             pos = self.trader.open_position("ETH", margin_usd=1000)

@@ -249,6 +249,74 @@ def _repair_positive_liquidation_history(path) -> None:
         logger.exception("Failed to repair positive liquidation history")
 
 
+def _repair_tp_hit_history(path) -> None:
+    """Normalize legacy TP rows to the configured net TP after fees/funding."""
+    if not path.exists():
+        return
+    try:
+        with open(path, "r", newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+            old_fields = list(reader.fieldnames or [])
+    except Exception:
+        logger.debug("Could not inspect trade history for TP repair", exc_info=True)
+        return
+
+    target_pct = config.FUTURES_NET_TP_PCT * 100
+    changed = False
+    for row in rows:
+        if row.get("engine") != "futures" or row.get("reason") != FuturesPositionStatus.TP_HIT.value:
+            continue
+        try:
+            entry_price = float(row.get("entry_price", 0.0) or 0.0)
+            amount_usd = float(row.get("amount_usd", 0.0) or 0.0)
+            notional = float(row.get("notional", 0.0) or 0.0)
+            leverage = float(row.get("leverage", 1.0) or 1.0)
+            pnl_pct = float(row.get("pnl_pct", 0.0) or 0.0)
+        except ValueError:
+            continue
+
+        if entry_price <= 0 or amount_usd <= 0 or notional <= 0:
+            continue
+        if abs(pnl_pct - target_pct) <= 0.08:
+            continue
+
+        hold_days = _hold_days_between(row.get("open_time", ""), row.get("close_time", ""))
+        repaired_exit = entry_price * (1 + _gross_tp_move_for_leverage(leverage, hold_days))
+        repaired_pnl, repaired_pct, repaired_exit_fee, repaired_funding = _recompute_net_pnl(
+            entry_price,
+            repaired_exit,
+            amount_usd,
+            notional,
+            row.get("open_time", ""),
+            row.get("close_time", ""),
+        )
+        row["exit_price"] = f"{repaired_exit:.8f}"
+        row["pnl_pct"] = f"{repaired_pct:.8f}"
+        row["pnl_usd"] = f"{repaired_pnl:.8f}"
+        row["exit_fee"] = f"{repaired_exit_fee:.8f}"
+        row["funding_paid"] = f"{repaired_funding:.8f}"
+        row["pnl_model"] = "net_includes_entry_fee"
+        changed = True
+
+    if not changed:
+        return
+
+    backup = path.with_suffix(".pre_tp_repair.csv")
+    try:
+        if not backup.exists():
+            backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        fieldnames = list(dict.fromkeys([*_CSV_HEADER, *old_fields]))
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({field: row.get(field, "") for field in fieldnames})
+        logger.warning("Repaired TP-hit rows in trade history: %s", path)
+    except Exception:
+        logger.exception("Failed to repair TP-hit history")
+
+
 class FuturesPositionStatus(str, Enum):
     OPEN = "open"
     TP_HIT = "tp_hit"
@@ -966,6 +1034,7 @@ class FuturesTrader:
             return
         _migrate_trade_history_fee_model(path)
         _repair_positive_liquidation_history(path)
+        _repair_tp_hit_history(path)
         loaded = 0
         with open(path, "r", encoding="utf-8") as f:
             for row in csv.DictReader(f):
