@@ -1,5 +1,6 @@
 """Tests for the paper-only Binance USDT-M Futures trader."""
 
+import csv
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -209,7 +210,7 @@ class TestFuturesTrader(unittest.TestCase):
 
         with patch.object(self.trader, "get_current_price", return_value=100.0):
             closed_seed = self.trader.open_position("ETH", margin_usd=1000)
-        with patch.object(self.trader, "get_current_price", return_value=closed_seed.tp_price):
+        with patch.object(self.trader, "get_current_price", return_value=closed_seed.tp_price * 1.01):
             self.trader.check_positions()
         with patch.object(self.trader, "get_current_price", return_value=100.0):
             self.trader.open_position("BTC", margin_usd=500)
@@ -264,25 +265,27 @@ class TestFuturesTrader(unittest.TestCase):
     def test_tp_hit_yields_positive_pnl(self):
         with patch.object(self.trader, "get_current_price", return_value=100.0):
             pos = self.trader.open_position("ETH", margin_usd=1000)
-        with patch.object(self.trader, "get_current_price", return_value=pos.tp_price):
+        with patch.object(self.trader, "get_current_price", return_value=pos.tp_price * 1.01):
             closed = self.trader.check_positions()
         self.assertEqual(len(closed), 1)
         self.assertEqual(closed[0].status, FuturesPositionStatus.TP_HIT)
         self.assertGreater(closed[0].pnl_pct, 0)
+        self.assertAlmostEqual(closed[0].pnl_pct, config.FUTURES_NET_TP_PCT * 100, delta=0.05)
 
     def test_closed_pnl_includes_entry_and_exit_fees(self):
         config.FUNDING_RATE_DAILY = 0
         with patch.object(self.trader, "get_current_price", return_value=100.0):
             pos = self.trader.open_position("ETH", margin_usd=1000)
-        close_price = pos.tp_price
-        gross = (close_price - pos.entry_price) * pos.quantity
+        close_price = pos.tp_price * 1.01
         entry_fee = pos.notional * config.FUTURES_FEE_PCT
-        exit_fee = (pos.quantity * close_price) * config.FUTURES_FEE_PCT
-        expected_pnl = gross - entry_fee - exit_fee
 
         with patch.object(self.trader, "get_current_price", return_value=close_price):
             closed = self.trader.check_positions()
 
+        close_price = closed[0].exit_price
+        gross = (close_price - pos.entry_price) * pos.quantity
+        exit_fee = (pos.quantity * close_price) * config.FUTURES_FEE_PCT
+        expected_pnl = gross - entry_fee - exit_fee
         self.assertAlmostEqual(closed[0].pnl_usd, expected_pnl, places=4)
         self.assertAlmostEqual(self.trader.cash_balance, config.CAPITAL_USD + expected_pnl, places=4)
 
@@ -302,6 +305,62 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertEqual(closed[0].status, FuturesPositionStatus.LIQUIDATED)
         self.assertLess(closed[0].pnl_pct, -100.0)
         self.assertGreaterEqual(self.trader.cash_balance, 0)
+
+    def test_upside_cross_liq_does_not_override_tp(self):
+        config.LEVERAGE = 20
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            pos = self.trader.open_position("ETH", margin_usd=100)
+        self.assertIsNotNone(pos)
+        pos.liquidation_price = pos.tp_price * 2
+
+        with (
+            patch.object(self.trader, "refresh_cross_liquidation_prices", return_value=None),
+            patch.object(self.trader, "get_current_price", return_value=pos.tp_price * 1.01),
+        ):
+            closed = self.trader.check_positions()
+
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(closed[0].status, FuturesPositionStatus.TP_HIT)
+        self.assertLess(closed[0].pnl_pct, 5.0)
+
+    def test_positive_liquidation_history_is_repaired_to_tp(self):
+        now = datetime.now(timezone.utc)
+        earlier = now - timedelta(hours=1)
+        row = {
+            "open_time": earlier.isoformat(),
+            "close_time": now.isoformat(),
+            "symbol": "BTC",
+            "engine": "futures",
+            "entry_price": "100",
+            "exit_price": "120",
+            "amount_usd": "100",
+            "notional": "2000",
+            "leverage": "20",
+            "pnl_pct": "395",
+            "pnl_usd": "395",
+            "entry_fee": "1.2",
+            "exit_fee": "1.44",
+            "funding_paid": "0.0",
+            "pnl_model": "net_includes_entry_fee",
+            "reason": "liquidated",
+            "entry_change_24h": "-2.5",
+        }
+        path = _history_csv()
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+            writer.writeheader()
+            writer.writerow(row)
+
+        repaired = FuturesTrader()
+        loaded = repaired.get_trade_history()[0]
+        with open(path, "r", newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+
+        self.assertEqual(loaded.status, FuturesPositionStatus.TP_HIT)
+        self.assertEqual(rows[0]["reason"], "tp_hit")
+        self.assertLess(float(rows[0]["exit_price"]), 101.0)
+        self.assertGreater(loaded.pnl_usd, 0)
+        self.assertLess(loaded.pnl_pct, 5.0)
 
     def test_expiry(self):
         with patch.object(self.trader, "get_current_price", return_value=100.0):

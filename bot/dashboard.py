@@ -3509,6 +3509,7 @@ class Dashboard:
         for pos in open_positions:
             age_h   = (now - pos.entry_time).total_seconds() / 3600
             current = pos.last_known_price or pos.entry_price
+            pos.tp_price = self.trader._net_tp_price(pos, now)
             leverage = getattr(pos, "leverage", 1)
             if current and pos.entry_price > 0:
                 price_chg = (current - pos.entry_price) / pos.entry_price
@@ -3517,7 +3518,7 @@ class Dashboard:
             else:
                 pnl_str = "--"
             risk_price = self._num(getattr(pos, "liquidation_price", 0.0), 0.0)
-            risk_str = f"${risk_price:.4f}" if risk_price > 0 else "No near liq"
+            risk_str = f"${risk_price:.4f}" if 0 < risk_price < pos.entry_price else "No near liq"
             self.pos_tree.insert("", "end", values=(
                 pos.symbol,
                 f"${pos.amount_usd:.2f}",

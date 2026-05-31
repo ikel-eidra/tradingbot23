@@ -146,6 +146,109 @@ def _migrate_trade_history_fee_model(path) -> None:
         logger.exception("Failed to migrate trade history fee model")
 
 
+def _hold_days_between(open_time: str, close_time: str) -> float:
+    try:
+        opened = datetime.fromisoformat(open_time)
+        closed = datetime.fromisoformat(close_time)
+        return max((closed - opened).total_seconds() / 86400, 0.0)
+    except Exception:
+        return 0.0
+
+
+def _gross_tp_move_for_leverage(leverage: float, hold_days: float = 0.0) -> float:
+    fee_drag = 2 * config.FUTURES_FEE_PCT * leverage
+    funding_drag = config.FUNDING_RATE_DAILY * leverage * max(hold_days, 0.0)
+    return (config.FUTURES_NET_TP_PCT + fee_drag + funding_drag) / leverage
+
+
+def _recompute_net_pnl(
+    entry_price: float,
+    exit_price: float,
+    amount_usd: float,
+    notional: float,
+    open_time: str,
+    close_time: str,
+) -> tuple[float, float, float, float]:
+    quantity = notional / entry_price if entry_price > 0 else 0.0
+    entry_fee = notional * config.FUTURES_FEE_PCT
+    exit_fee = quantity * exit_price * config.FUTURES_FEE_PCT if exit_price > 0 else 0.0
+    hold_days = _hold_days_between(open_time, close_time)
+    funding_paid = notional * config.FUNDING_RATE_DAILY * hold_days
+    gross_pnl = (exit_price - entry_price) * quantity
+    pnl_usd = gross_pnl - entry_fee - exit_fee - funding_paid
+    pnl_pct = (pnl_usd / amount_usd * 100) if amount_usd > 0 else 0.0
+    return pnl_usd, pnl_pct, exit_fee, funding_paid
+
+
+def _repair_positive_liquidation_history(path) -> None:
+    """Correct legacy rows where upside TP winners were mislabeled liquidations."""
+    if not path.exists():
+        return
+    try:
+        with open(path, "r", newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+            old_fields = list(reader.fieldnames or [])
+    except Exception:
+        logger.debug("Could not inspect trade history for positive-liq repair", exc_info=True)
+        return
+
+    changed = False
+    for row in rows:
+        if row.get("engine") != "futures" or row.get("reason") != FuturesPositionStatus.LIQUIDATED.value:
+            continue
+        try:
+            entry_price = float(row.get("entry_price", 0.0) or 0.0)
+            exit_price = float(row.get("exit_price", 0.0) or 0.0)
+            amount_usd = float(row.get("amount_usd", 0.0) or 0.0)
+            notional = float(row.get("notional", 0.0) or 0.0)
+            leverage = float(row.get("leverage", 1.0) or 1.0)
+            pnl_usd = float(row.get("pnl_usd", 0.0) or 0.0)
+        except ValueError:
+            continue
+
+        if entry_price <= 0 or amount_usd <= 0 or notional <= 0:
+            continue
+        if exit_price <= entry_price or pnl_usd <= 0:
+            continue
+
+        hold_days = _hold_days_between(row.get("open_time", ""), row.get("close_time", ""))
+        repaired_exit = entry_price * (1 + _gross_tp_move_for_leverage(leverage, hold_days))
+        repaired_pnl, repaired_pct, repaired_exit_fee, repaired_funding = _recompute_net_pnl(
+            entry_price,
+            repaired_exit,
+            amount_usd,
+            notional,
+            row.get("open_time", ""),
+            row.get("close_time", ""),
+        )
+        row["exit_price"] = f"{repaired_exit:.8f}"
+        row["pnl_pct"] = f"{repaired_pct:.8f}"
+        row["pnl_usd"] = f"{repaired_pnl:.8f}"
+        row["exit_fee"] = f"{repaired_exit_fee:.8f}"
+        row["funding_paid"] = f"{repaired_funding:.8f}"
+        row["pnl_model"] = "net_includes_entry_fee"
+        row["reason"] = FuturesPositionStatus.TP_HIT.value
+        changed = True
+
+    if not changed:
+        return
+
+    backup = path.with_suffix(".pre_positive_liq_repair.csv")
+    try:
+        if not backup.exists():
+            backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        fieldnames = list(dict.fromkeys([*_CSV_HEADER, *old_fields]))
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({field: row.get(field, "") for field in fieldnames})
+        logger.warning("Repaired positive liquidation rows in trade history: %s", path)
+    except Exception:
+        logger.exception("Failed to repair positive liquidation history")
+
+
 class FuturesPositionStatus(str, Enum):
     OPEN = "open"
     TP_HIT = "tp_hit"
@@ -368,6 +471,7 @@ class FuturesTrader:
         self._client: BinanceClient | None = None
         self._load_trade_history()
         self._load_open_positions()
+        self._reconcile_cash_balance_with_ledger()
 
         logger.info(
             "FuturesTrader initialized | Cross margin | Leverage: %dx | "
@@ -606,8 +710,8 @@ class FuturesTrader:
         # PNL_on_margin = price_change% × leverage − fee_drag − funding_drag
         # fee_drag (round trip) = 2 × FUTURES_FEE_PCT × leverage (charged on notional)
         fee_drag = 2 * config.FUTURES_FEE_PCT * self.leverage
-        funding_drag = config.FUNDING_RATE_DAILY * self.leverage * 1.5  # ~1.5d avg hold
-        gross_tp_move = (config.FUTURES_NET_TP_PCT + fee_drag + funding_drag) / self.leverage
+        funding_drag = config.FUNDING_RATE_DAILY * self.leverage * 1.5  # conservative SL buffer
+        gross_tp_move = _gross_tp_move_for_leverage(self.leverage, 0.0)
         gross_sl_move = (config.FUTURES_NET_SL_PCT - fee_drag - funding_drag) / self.leverage
         gross_sl_move = max(gross_sl_move, 0.001)
 
@@ -699,9 +803,11 @@ class FuturesTrader:
             if price is None:
                 continue
 
+            pos.tp_price = self._net_tp_price(pos, now)
+
             # Cross-margin liquidation safety check.
-            if pos.liquidation_price > 0 and price <= pos.liquidation_price:
-                self._close(pos, pos.liquidation_price, FuturesPositionStatus.LIQUIDATED, now)
+            if self._is_downside_liquidation_trigger(pos, price):
+                self._close(pos, price, FuturesPositionStatus.LIQUIDATED, now)
                 closed.append(pos)
                 continue
 
@@ -743,6 +849,17 @@ class FuturesTrader:
             self.refresh_cross_liquidation_prices()
             self._save_open_positions()
         return closed
+
+    @staticmethod
+    def _is_downside_liquidation_trigger(pos: FuturesPosition, price: float) -> bool:
+        """For a long, liquidation is only a downside threshold below entry."""
+        liq = pos.liquidation_price
+        return liq > 0 and liq < pos.entry_price and price <= liq
+
+    @staticmethod
+    def _net_tp_price(pos: FuturesPosition, now: datetime) -> float:
+        hold_days = max((now - pos.entry_time).total_seconds() / 86400, 0.0)
+        return pos.entry_price * (1 + _gross_tp_move_for_leverage(pos.leverage, hold_days))
 
     def _close(
         self,
@@ -848,6 +965,7 @@ class FuturesTrader:
             self.cash_balance = accounting.total_contributed_capital()
             return
         _migrate_trade_history_fee_model(path)
+        _repair_positive_liquidation_history(path)
         loaded = 0
         with open(path, "r", encoding="utf-8") as f:
             for row in csv.DictReader(f):
@@ -1160,6 +1278,27 @@ class FuturesTrader:
                 self._save_open_positions()
         except Exception:
             logger.exception("Failed to load open positions from disk")
+
+    def _cash_balance_from_ledger(self) -> float:
+        closed_pnl = sum(p.pnl_usd for p in self.get_trade_history())
+        open_positions = self.get_open_positions()
+        open_margin = sum(p.margin_used for p in open_positions)
+        open_entry_fees = sum(self._entry_fee_for(p) for p in open_positions)
+        return accounting.total_contributed_capital() + closed_pnl - open_margin - open_entry_fees
+
+    def _reconcile_cash_balance_with_ledger(self) -> None:
+        expected_cash = self._cash_balance_from_ledger()
+        if abs(expected_cash - self.cash_balance) < 0.01:
+            return
+        logger.warning(
+            "Reconciled futures free cash from ledger | Saved: $%.2f | Ledger: $%.2f",
+            self.cash_balance,
+            expected_cash,
+        )
+        self.cash_balance = expected_cash
+        self._normalize_cash_balance()
+        self.refresh_cross_liquidation_prices()
+        self._save_open_positions()
 
     def _normalize_cash_balance(self) -> None:
         """Avoid tiny floating-point cash dust showing as negative zero."""
