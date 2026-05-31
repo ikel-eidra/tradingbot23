@@ -47,6 +47,11 @@ class TestFuturesTrader(unittest.TestCase):
         config.TP_COOLDOWN_HOURS = 1
         config.MONTHLY_CONTRIBUTION_USD = 0
         config.MONTHLY_CONTRIBUTION_DAY = 1
+        config.PRE_TRADE_BREAKDOWN_GUARD_ENABLED = True
+        config.PRE_TRADE_MAX_24H_DROP_PCT = 8.0
+        config.PRE_TRADE_MAX_LOWER_CLOSE_STREAK = 5
+        config.PRE_TRADE_MAX_BELOW_SMA20_PCT = 1.5
+        config.PRE_TRADE_MIN_BREAKDOWN_REBOUND_PCT = 1.0
         self.trader = FuturesTrader()
 
     def test_leverage_clamp(self):
@@ -74,6 +79,17 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertEqual(analysis.decision, "WAIT")
         self.assertFalse(analysis.allowed)
         self.assertIn("no rebound", analysis.reason)
+
+    def test_pre_trade_breakdown_guard_blocks_lower_close_streak(self):
+        closes = [100.0] * 84
+        closes += [99.8, 99.6, 99.4, 99.2, 99.0, 98.8, 98.6, 98.4, 98.2, 98.0, 97.8, 97.6, 97.4]
+
+        analysis = analyze_pre_trade_klines("TEST", _klines_from_closes(closes))
+
+        self.assertEqual(analysis.decision, "WAIT")
+        self.assertFalse(analysis.allowed)
+        self.assertIn("breakdown guard", analysis.reason)
+        self.assertIn("lower closes", analysis.reason)
 
     def test_pre_trade_analysis_allows_rebound_wave(self):
         closes = [100 - (i * 0.08) for i in range(70)]

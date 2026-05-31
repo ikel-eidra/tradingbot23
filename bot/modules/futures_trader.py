@@ -394,6 +394,16 @@ def _pct_change(current: float, previous: float) -> float:
     return ((current - previous) / previous * 100) if previous > 0 else 0.0
 
 
+def _recent_lower_close_streak(closes: list[float]) -> int:
+    streak = 0
+    for idx in range(len(closes) - 1, 0, -1):
+        if closes[idx] < closes[idx - 1]:
+            streak += 1
+        else:
+            break
+    return streak
+
+
 def analyze_pre_trade_klines(symbol: str, klines: list) -> PreTradeAnalysis:
     """Score whether a dip candidate has a tradable rebound structure.
 
@@ -445,6 +455,10 @@ def analyze_pre_trade_klines(symbol: str, klines: list) -> PreTradeAnalysis:
     sma20 = sum(closes[-20:]) / 20
     above_sma20 = _pct_change(current, sma20)
     last_three_up = len(closes) >= 4 and closes[-1] > closes[-2] > closes[-3]
+    lower_close_streak = _recent_lower_close_streak(closes)
+    previous_sma20 = sum(closes[-28:-8]) / 20 if len(closes) >= 28 else sma20
+    sma20_slope = _pct_change(sma20, previous_sma20)
+    drawdown_from_high = _pct_change(current, high_24h)
 
     score = 50.0
     notes: list[str] = []
@@ -495,6 +509,37 @@ def analyze_pre_trade_klines(symbol: str, klines: list) -> PreTradeAnalysis:
         score -= 10
         notes.append(f"deep 24h drop {change_24h:+.2f}%")
 
+    if config.PRE_TRADE_BREAKDOWN_GUARD_ENABLED:
+        if (
+            change_24h <= -config.PRE_TRADE_MAX_24H_DROP_PCT
+            and change_4h <= 0
+            and change_1h <= 0
+            and rebound_from_low < config.PRE_TRADE_MIN_BREAKDOWN_REBOUND_PCT
+        ):
+            score -= 35
+            blockers.append(
+                "breakdown guard: 24h/4h/1h still down with weak rebound "
+                f"({rebound_from_low:+.2f}%)"
+            )
+
+        if lower_close_streak >= config.PRE_TRADE_MAX_LOWER_CLOSE_STREAK:
+            score -= 25
+            blockers.append(f"breakdown guard: {lower_close_streak} lower closes")
+
+        if sma20_slope < 0 and above_sma20 <= -config.PRE_TRADE_MAX_BELOW_SMA20_PCT:
+            score -= 20
+            blockers.append(
+                "breakdown guard: below falling 20-candle average "
+                f"({above_sma20:+.2f}%, slope {sma20_slope:+.2f}%)"
+            )
+
+        if drawdown_from_high <= -config.PRE_TRADE_MAX_24H_DROP_PCT and rebound_from_low <= 0.10:
+            score -= 20
+            blockers.append(
+                "breakdown guard: pinned near 24h low "
+                f"(drawdown {drawdown_from_high:+.2f}%)"
+            )
+
     score = max(0.0, min(100.0, score))
     decision = "RUN" if score >= config.PRE_TRADE_MIN_SCORE and not blockers else "WAIT"
     summary = (
@@ -502,7 +547,7 @@ def analyze_pre_trade_klines(symbol: str, klines: list) -> PreTradeAnalysis:
         f"bounce {rebound_from_low:.2f}% | range {range_24h:.2f}%"
     )
     reason_parts = blockers or notes or ["wave structure acceptable"]
-    reason = f"{summary}; {'; '.join(reason_parts[:3])}"
+    reason = f"{summary}; {'; '.join(reason_parts[:5])}"
 
     return PreTradeAnalysis(
         symbol=symbol,

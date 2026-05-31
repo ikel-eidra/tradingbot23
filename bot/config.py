@@ -66,6 +66,20 @@ PRE_TRADE_MAX_4H_DROP_PCT = float(os.getenv("PRE_TRADE_MAX_4H_DROP_PCT", "2.50")
 PRE_TRADE_MIN_24H_RANGE_PCT = float(os.getenv("PRE_TRADE_MIN_24H_RANGE_PCT", "1.20"))
 PRE_TRADE_KLINE_INTERVAL = os.getenv("PRE_TRADE_KLINE_INTERVAL", "15m")
 PRE_TRADE_KLINE_LIMIT = int(os.getenv("PRE_TRADE_KLINE_LIMIT", "97"))
+PRE_TRADE_BREAKDOWN_GUARD_ENABLED = os.getenv("PRE_TRADE_BREAKDOWN_GUARD_ENABLED", "true").lower() == "true"
+PRE_TRADE_MAX_24H_DROP_PCT = float(os.getenv("PRE_TRADE_MAX_24H_DROP_PCT", "8.0"))
+PRE_TRADE_MAX_LOWER_CLOSE_STREAK = int(os.getenv("PRE_TRADE_MAX_LOWER_CLOSE_STREAK", "5"))
+PRE_TRADE_MAX_BELOW_SMA20_PCT = float(os.getenv("PRE_TRADE_MAX_BELOW_SMA20_PCT", "1.5"))
+PRE_TRADE_MIN_BREAKDOWN_REBOUND_PCT = float(os.getenv("PRE_TRADE_MIN_BREAKDOWN_REBOUND_PCT", "1.0"))
+
+# Uses the local futures paper ledger to quarantine symbols that already caused
+# large realized losses. This keeps repeated "failing coin" entries out of the
+# monthly basket/dip pool until the lookback window passes.
+PAPER_SYMBOL_GUARD_ENABLED = os.getenv("PAPER_SYMBOL_GUARD_ENABLED", "true").lower() == "true"
+PAPER_SYMBOL_GUARD_LOOKBACK_DAYS = float(os.getenv("PAPER_SYMBOL_GUARD_LOOKBACK_DAYS", "30"))
+PAPER_SYMBOL_GUARD_MAX_REALIZED_LOSS_USD = float(os.getenv("PAPER_SYMBOL_GUARD_MAX_REALIZED_LOSS_USD", "50"))
+PAPER_SYMBOL_GUARD_EXPIRED_LOSS_USD = float(os.getenv("PAPER_SYMBOL_GUARD_EXPIRED_LOSS_USD", "25"))
+PAPER_SYMBOL_GUARD_BLOCK_LIQUIDATED = os.getenv("PAPER_SYMBOL_GUARD_BLOCK_LIQUIDATED", "true").lower() == "true"
 
 # Skip new entries when BTC's 1h change is below this (negative) value.
 # Avoids buying alts during broad market dumps. Set to None to disable.

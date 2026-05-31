@@ -5,7 +5,7 @@ signal generation.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from bot import config
 from bot.modules.data_fetcher import DataFetcher
@@ -31,6 +31,7 @@ class Strategy:
         self.basket_year: int | None = None
         self._crash_mode: bool = False
         self.last_pre_trade_decisions: list[dict] = []
+        self._paper_guard_reason_cache: dict[str, str | None] = {}
 
     def _rank(self, coin: dict) -> int | None:
         """Return the market-cap rank we use for the top-N guard."""
@@ -65,6 +66,111 @@ class Strategy:
                 skipped,
             )
         return eligible
+
+    @staticmethod
+    def _position_status_value(pos) -> str:
+        status = getattr(pos, "status", "")
+        return getattr(status, "value", status) or ""
+
+    def _paper_guard_reason(self, symbol: str, now: datetime | None = None) -> str | None:
+        symbol = symbol.upper()
+        if not config.PAPER_SYMBOL_GUARD_ENABLED:
+            return None
+        if symbol in self._paper_guard_reason_cache:
+            return self._paper_guard_reason_cache[symbol]
+
+        history_getter = getattr(self.trader, "get_trade_history", None)
+        if history_getter is None:
+            self._paper_guard_reason_cache[symbol] = None
+            return None
+
+        now = now or datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=config.PAPER_SYMBOL_GUARD_LOOKBACK_DAYS)
+        recent = []
+        try:
+            for pos in history_getter():
+                if getattr(pos, "symbol", "").upper() != symbol:
+                    continue
+                exit_time = getattr(pos, "exit_time", None)
+                if exit_time is not None and exit_time < cutoff:
+                    continue
+                recent.append(pos)
+        except Exception:
+            logger.debug("Paper symbol guard could not read trade history", exc_info=True)
+            self._paper_guard_reason_cache[symbol] = None
+            return None
+
+        if not recent:
+            self._paper_guard_reason_cache[symbol] = None
+            return None
+
+        total_pnl = sum(float(getattr(pos, "pnl_usd", 0.0) or 0.0) for pos in recent)
+        if total_pnl <= -config.PAPER_SYMBOL_GUARD_MAX_REALIZED_LOSS_USD:
+            reason = (
+                f"paper guard: {symbol} realized {total_pnl:+.2f} USD over "
+                f"{config.PAPER_SYMBOL_GUARD_LOOKBACK_DAYS:.0f}d"
+            )
+            self._paper_guard_reason_cache[symbol] = reason
+            return reason
+
+        if config.PAPER_SYMBOL_GUARD_BLOCK_LIQUIDATED:
+            liquidated = [
+                pos for pos in recent
+                if self._position_status_value(pos) == "liquidated"
+            ]
+            if liquidated:
+                reason = f"paper guard: {symbol} had recent liquidation"
+                self._paper_guard_reason_cache[symbol] = reason
+                return reason
+
+        expired_losses = [
+            pos for pos in recent
+            if self._position_status_value(pos) == "expired"
+            and float(getattr(pos, "pnl_usd", 0.0) or 0.0) <= -config.PAPER_SYMBOL_GUARD_EXPIRED_LOSS_USD
+        ]
+        if expired_losses:
+            worst = min(float(getattr(pos, "pnl_usd", 0.0) or 0.0) for pos in expired_losses)
+            reason = f"paper guard: {symbol} expired loss {worst:+.2f} USD"
+            self._paper_guard_reason_cache[symbol] = reason
+            return reason
+
+        self._paper_guard_reason_cache[symbol] = None
+        return None
+
+    def _paper_guard_allows_candidate(
+        self,
+        symbol: str,
+        source: str,
+        *,
+        record: bool = True,
+    ) -> bool:
+        reason = self._paper_guard_reason(symbol)
+        if reason is None:
+            return True
+
+        logger.info("[PAPER-GUARD] WAIT %s | %s", symbol, reason)
+        if record:
+            self.last_pre_trade_decisions.append({
+                "symbol": symbol,
+                "source": source,
+                "decision": "WAIT",
+                "score": 0,
+                "reason": reason,
+            })
+        return False
+
+    def _filter_paper_guarded(self, coins: list[dict], context: str) -> list[dict]:
+        kept = []
+        blocked = []
+        for coin in coins:
+            symbol = coin.get("symbol", "")
+            if self._paper_guard_allows_candidate(symbol, context, record=False):
+                kept.append(coin)
+            else:
+                blocked.append(symbol)
+        if blocked:
+            logger.warning("%s paper guard skipped: %s", context, blocked)
+        return kept
 
     @staticmethod
     def _analysis_allowed(analysis) -> bool:
@@ -154,7 +260,11 @@ class Strategy:
 
         logger.info("Taking monthly snapshot for %s %d", now.strftime("%B"), now.year)
         coins = self._filter_top_ranked(self.fetcher.get_top_coins(), "Monthly universe")
-        losers = self.fetcher.get_top_losers(coins)
+        expanded_losers = self.fetcher.get_top_losers(
+            coins,
+            n_losers=min(len(coins), max(config.TOP_N_LOSERS * 3, config.TOP_N_LOSERS + 5)),
+        )
+        losers = self._filter_paper_guarded(expanded_losers, "Monthly basket")[:config.TOP_N_LOSERS]
 
         if not losers:
             logger.warning("No losers found — market may be fully green. Keeping previous basket.")
@@ -221,6 +331,8 @@ class Strategy:
             if not self._is_top_ranked_coin(fresh_coin):
                 logger.debug("Skipping %s — fresh rank is outside top %d", symbol, config.TOP_N_COINS)
                 continue
+            if not self._paper_guard_allows_candidate(symbol, "dip_pool", record=False):
+                continue
 
             change_24h    = fresh_coin["percent_change_24h"]
             current_price = fresh_coin["price"]
@@ -245,6 +357,8 @@ class Strategy:
             symbol = coin["symbol"]
             if not self._is_tradeable_symbol(symbol):
                 logger.debug("Skipping %s futures dip — excluded from futures universe", symbol)
+                continue
+            if not self._paper_guard_allows_candidate(symbol, "futures_dip_pool", record=False):
                 continue
             change_5m = self.trader.get_5m_change(symbol)
             if change_5m is None:
@@ -327,6 +441,9 @@ class Strategy:
                 logger.debug("Skipping %s — already have open position", symbol)
                 continue
 
+            if not self._paper_guard_allows_candidate(symbol, "dip"):
+                continue
+
             if not self._pre_trade_allows_entry(coin, "dip"):
                 continue
 
@@ -380,6 +497,8 @@ class Strategy:
             if not self._is_top_ranked_coin(fresh_coin):
                 logger.debug("Skipping %s fill — fresh rank is outside top %d", sym, config.TOP_N_COINS)
                 continue
+            if not self._paper_guard_allows_candidate(sym, "fill_pool", record=False):
+                continue
             candidates.append({
                 **coin,
                 "cmc_rank": fresh_coin.get("cmc_rank", coin.get("cmc_rank")),
@@ -393,6 +512,8 @@ class Strategy:
         for coin in candidates:
             if len(opened) >= slots:
                 break
+            if not self._paper_guard_allows_candidate(coin["symbol"], "fill"):
+                continue
             if not self._pre_trade_allows_entry(coin, "fill"):
                 continue
             position = self.trader.open_position(
@@ -460,6 +581,7 @@ class Strategy:
             "pre_trade_decisions": [],
         }
         self.last_pre_trade_decisions = []
+        self._paper_guard_reason_cache = {}
 
         if hasattr(self.trader, "apply_monthly_contribution"):
             contributed = self.trader.apply_monthly_contribution(now)

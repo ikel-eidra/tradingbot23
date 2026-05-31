@@ -1,7 +1,7 @@
 """Tests for the strategy engine."""
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from bot import config
@@ -24,6 +24,11 @@ class TestStrategy(unittest.TestCase):
         config.MAX_OPEN_TRADES = 5
         config.PRE_TRADE_ANALYSIS_ENABLED = True
         config.PRE_TRADE_MIN_SCORE = 60
+        config.PAPER_SYMBOL_GUARD_ENABLED = True
+        config.PAPER_SYMBOL_GUARD_LOOKBACK_DAYS = 30
+        config.PAPER_SYMBOL_GUARD_MAX_REALIZED_LOSS_USD = 50
+        config.PAPER_SYMBOL_GUARD_EXPIRED_LOSS_USD = 25
+        config.PAPER_SYMBOL_GUARD_BLOCK_LIQUIDATED = True
 
     def test_execute_signals_respects_max_open_slots(self):
         """Should not open more positions than the configured basket slots."""
@@ -158,6 +163,41 @@ class TestStrategy(unittest.TestCase):
         self.assertEqual(strategy.last_pre_trade_decisions[0]["decision"], "WAIT")
         self.assertEqual(strategy.last_pre_trade_decisions[0]["source"], "dip")
 
+    def test_execute_signals_skips_symbol_quarantined_by_paper_history(self):
+        """Paper history can block a coin before the wave analysis is even run."""
+
+        class FakeTrader:
+            def __init__(self):
+                self.positions = []
+
+            def get_open_positions(self):
+                return list(self.positions)
+
+            def get_trade_history(self):
+                return [
+                    SimpleNamespace(
+                        symbol="BAD",
+                        status="liquidated",
+                        pnl_usd=-120.0,
+                        exit_time=datetime.now(timezone.utc) - timedelta(days=1),
+                    )
+                ]
+
+            def pre_trade_analysis(self, symbol):
+                raise AssertionError("paper guard should run before pre-trade analysis")
+
+            def open_position(self, symbol, entry_price=None, entry_change_24h=0.0):
+                raise AssertionError("open_position should not be called")
+
+        strategy = Strategy(trader=FakeTrader())
+        opened = strategy.execute_signals([
+            {"symbol": "BAD", "cmc_rank": 12, "current_price": 1.0, "change_24h": -5.0},
+        ])
+
+        self.assertEqual(opened, [])
+        self.assertEqual(strategy.last_pre_trade_decisions[0]["decision"], "WAIT")
+        self.assertIn("paper guard", strategy.last_pre_trade_decisions[0]["reason"])
+
     def test_execute_signals_opens_when_pre_trade_wave_filter_allows(self):
         """A dip opens only after the wave score passes."""
 
@@ -189,6 +229,62 @@ class TestStrategy(unittest.TestCase):
 
         self.assertEqual([p.symbol for p in opened], ["GOOD"])
         self.assertEqual(strategy.last_pre_trade_decisions[0]["decision"], "RUN")
+
+    def test_refresh_basket_replaces_paper_guarded_loser(self):
+        """A quarantined loser is not kept in the monthly candidate pool."""
+
+        config.TOP_N_LOSERS = 2
+        config.MAX_OPEN_TRADES = 2
+
+        class FakeFetcher:
+            def get_top_coins(self):
+                return [
+                    {
+                        "symbol": "BAD",
+                        "cmc_rank": 10,
+                        "price": 1.0,
+                        "percent_change_24h": -10.0,
+                        "volume_24h": 100_000_000,
+                    },
+                    {
+                        "symbol": "GOOD",
+                        "cmc_rank": 11,
+                        "price": 1.0,
+                        "percent_change_24h": -8.0,
+                        "volume_24h": 100_000_000,
+                    },
+                    {
+                        "symbol": "NEXT",
+                        "cmc_rank": 12,
+                        "price": 1.0,
+                        "percent_change_24h": -6.0,
+                        "volume_24h": 100_000_000,
+                    },
+                ]
+
+            def get_top_losers(self, coins=None, n_losers=None, min_volume=None):
+                losers = [c for c in coins if c["percent_change_24h"] < 0]
+                losers.sort(key=lambda c: c["percent_change_24h"])
+                return losers[:n_losers]
+
+            def save_snapshot(self, losers, now=None):
+                return None
+
+        class FakeTrader:
+            def get_trade_history(self):
+                return [
+                    SimpleNamespace(
+                        symbol="BAD",
+                        status="expired",
+                        pnl_usd=-80.0,
+                        exit_time=datetime.now(timezone.utc) - timedelta(days=2),
+                    )
+                ]
+
+        strategy = Strategy(fetcher=FakeFetcher(), trader=FakeTrader())
+        basket = strategy.refresh_basket(datetime.now(timezone.utc))
+
+        self.assertEqual([c["symbol"] for c in basket], ["GOOD", "NEXT"])
 
     def test_fill_empty_slots_skips_stale_outside_top_50_basket_entries(self):
         """Stale basket rows outside top 50 should not refill empty slots."""
