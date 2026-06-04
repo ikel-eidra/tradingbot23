@@ -146,6 +146,9 @@ All settings live in `.env`. The Settings tab in the GUI lets you change most of
 | `FUTURES_USE_SL` | `false` | Enable hard stop-loss (disabled by default) |
 | `MAX_HOLD_DAYS` | `3` | Auto-close after N days |
 | `DIP_THRESHOLD_PCT` | `0.02` | Entry trigger: −2% 24h change |
+| `CRASH_BTC_TRIGGER_PCT` | `-0.04` | BTC 24h move that blocks new entries and arms emergency crash SL |
+| `CRASH_BTC_RECOVERY_PCT` | `-0.02` | BTC 24h recovery level required before crash mode lifts |
+| `CRASH_SL_PCT` | `0.015` | Emergency crash SL distance below current price |
 | `AUTO_START_FUTURES` | `false` | New installs open paused so futures paper trades do not auto-open until Resume is pressed |
 | `SETTINGS_CONFIRMED` | `false` | First-run guard; app opens Settings first until Apply Settings is clicked |
 | `BREAK_EVEN_TRIGGER_PCT` | `0.005` | Slide SL to break-even after +0.5% move |

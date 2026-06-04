@@ -685,17 +685,29 @@ class FuturesTrader:
 
     def get_portfolio_value(self) -> float:
         """Cash balance + unrealized margin value using cached prices (no UI-thread API calls)."""
-        unrealized = 0.0
-        for pos in self.positions:
-            if pos.status == FuturesPositionStatus.OPEN:
-                price = pos.last_known_price or pos.entry_price
-                price_change = (price - pos.entry_price) / pos.entry_price
-                unrealized += pos.margin_used * (1 + price_change * pos.leverage)
-        return self.cash_balance + unrealized
+        equity, _maintenance = self._account_equity_and_maintenance()
+        return equity
 
     @staticmethod
     def _mark_price(pos: FuturesPosition) -> float:
         return pos.last_known_price or pos.entry_price
+
+    def _account_equity_and_maintenance(
+        self,
+        positions: list[FuturesPosition] | None = None,
+    ) -> tuple[float, float]:
+        """Return cross-account equity and maintenance requirement at cached marks."""
+        open_positions = [
+            p for p in (positions or self.get_open_positions())
+            if p.status == FuturesPositionStatus.OPEN
+        ]
+        equity = self.cash_balance
+        maintenance = 0.0
+        for pos in open_positions:
+            mark = self._mark_price(pos)
+            equity += pos.margin_used + ((mark - pos.entry_price) * pos.quantity)
+            maintenance += mark * pos.quantity * MAINTENANCE_MARGIN_RATE
+        return equity, maintenance
 
     def _cross_liquidation_price(
         self,
@@ -908,6 +920,23 @@ class FuturesTrader:
             pos.last_known_price = price
 
         self.refresh_cross_liquidation_prices()
+
+        account_equity, maintenance_margin = self._account_equity_and_maintenance(open_positions)
+        if open_positions and account_equity <= maintenance_margin:
+            logger.warning(
+                "[PAPER-FUT] CROSS ACCOUNT LIQUIDATION | equity $%.2f <= maintenance $%.2f",
+                account_equity,
+                maintenance_margin,
+            )
+            for pos in open_positions:
+                if pos.status != FuturesPositionStatus.OPEN:
+                    continue
+                price = pos.last_known_price or pos.entry_price
+                self._close(pos, price, FuturesPositionStatus.LIQUIDATED, now)
+                closed.append(pos)
+            self.refresh_cross_liquidation_prices()
+            self._save_open_positions()
+            return closed
 
         for pos in open_positions:
             if pos.status != FuturesPositionStatus.OPEN:

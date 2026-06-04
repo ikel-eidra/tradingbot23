@@ -322,6 +322,23 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertLess(closed[0].pnl_pct, -100.0)
         self.assertGreaterEqual(self.trader.cash_balance, 0)
 
+    def test_account_level_cross_liquidation_closes_underwater_book(self):
+        config.LEVERAGE = 20
+        config.FUTURES_USE_SL = False
+        trader = FuturesTrader()
+
+        with patch.object(trader, "get_current_price", return_value=100.0):
+            for symbol in ("BTC", "ETH", "BNB"):
+                self.assertIsNotNone(trader.open_position(symbol, margin_usd=3000))
+
+        with patch.object(trader, "get_current_price", return_value=80.0):
+            closed = trader.check_positions()
+
+        self.assertEqual(len(closed), 3)
+        self.assertEqual(trader.get_open_positions(), [])
+        self.assertTrue(all(pos.status == FuturesPositionStatus.LIQUIDATED for pos in closed))
+        self.assertGreaterEqual(trader.cash_balance, 0)
+
     def test_upside_cross_liq_does_not_override_tp(self):
         config.LEVERAGE = 20
         with patch.object(self.trader, "get_current_price", return_value=100.0):

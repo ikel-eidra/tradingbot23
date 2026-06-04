@@ -156,13 +156,13 @@ FUTURES_DIP_THRESHOLD_PCT = float(os.getenv("FUTURES_DIP_THRESHOLD_PCT", "0.005"
 
 # --- Crash Detection ---
 # BTC 24h drop below this triggers crash mode: blocks entries + arms emergency SL.
-# -8% based on historical crashes (May 2021: -30%, Nov 2022: -16%, Aug 2024: -9%)
-CRASH_BTC_TRIGGER_PCT = float(os.getenv("CRASH_BTC_TRIGGER_PCT", "-0.08"))
+# 20x paper exposure needs an earlier guard than historical full-crash thresholds.
+CRASH_BTC_TRIGGER_PCT = float(os.getenv("CRASH_BTC_TRIGGER_PCT", "-0.04"))
 # BTC 24h must recover above this before normal trading resumes (hysteresis gap).
-CRASH_BTC_RECOVERY_PCT = float(os.getenv("CRASH_BTC_RECOVERY_PCT", "-0.05"))
+CRASH_BTC_RECOVERY_PCT = float(os.getenv("CRASH_BTC_RECOVERY_PCT", "-0.02"))
 # Emergency SL is set this far below current price when crash mode activates.
-# 3% below current = protects most remaining margin while allowing small bounces.
-CRASH_SL_PCT = float(os.getenv("CRASH_SL_PCT", "0.03"))
+# 1.5% below current protects 20x paper margin while allowing small bounces.
+CRASH_SL_PCT = float(os.getenv("CRASH_SL_PCT", "0.015"))
 
 # --- Stablecoins to exclude ---
 STABLECOIN_SYMBOLS = {
