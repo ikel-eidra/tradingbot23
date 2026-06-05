@@ -203,6 +203,13 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_ALLOW_CONTROL = os.getenv("TELEGRAM_ALLOW_CONTROL", "false").lower() == "true"
 
+# --- Ohverlay local overlay notifications ---
+OHVERLAY_ENABLED = os.getenv("OHVERLAY_ENABLED", "false").lower() == "true"
+OHVERLAY_WEBHOOK_URL = os.getenv("OHVERLAY_WEBHOOK_URL", "http://127.0.0.1:7277/message")
+OHVERLAY_SENDER = os.getenv("OHVERLAY_SENDER", "TradingBot23")
+OHVERLAY_TIMEOUT_SECS = float(os.getenv("OHVERLAY_TIMEOUT_SECS", "2.0"))
+OHVERLAY_MAX_CHARS = int(os.getenv("OHVERLAY_MAX_CHARS", "420"))
+
 # --- Logging ---
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 

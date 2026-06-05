@@ -21,6 +21,7 @@ from typing import Any
 import requests
 
 from bot import config
+from bot.modules import ohverlay_notifier as ov
 
 logger = logging.getLogger(__name__)
 DashboardCallback = Callable[[], str]
@@ -106,6 +107,7 @@ def send_dashboard_text(text: str) -> None:
 
 
 def alert_p2p_signal(text: str) -> None:
+    ov.send(text, title="TradingBot23 P2P Assist", source="tradingbot23-p2p")
     _send(
         f"📣 <b>TradingBot23 P2P Assist</b>\n{text}",
         reply_markup=dashboard_keyboard(),
@@ -283,6 +285,15 @@ def alert_opened(symbol: str, entry_price: float, tp_price: float,
     emoji = _EMOJI["fill"] if filled else _EMOJI["open"]
     tag   = "FILLED (no dip)" if filled else "DIP ENTRY"
     mode  = config.TRADING_MODE.upper()
+    ov.send_event(
+        f"TradingBot23 {tag}",
+        [
+            f"{symbol} opened at ${entry_price:,.4f} ({change_24h:+.2f}% 24h)",
+            f"Margin ${margin_usd:.2f} | {leverage}x | TP ${tp_price:,.4f}",
+            f"Cross LIQ ${liq_price:,.4f}",
+        ],
+        source="tradingbot23-futures",
+    )
     _send(
         f"{emoji} <b>TradingBot23 [{mode}] — {tag}</b>\n"
         f"Coin: <b>{symbol}</b>\n"
@@ -297,6 +308,16 @@ def alert_closed(symbol: str, entry_price: float, exit_price: float,
                  portfolio: float) -> None:
     emoji = _EMOJI.get(reason, "🔔")
     mode  = config.TRADING_MODE.upper()
+    ov.send_event(
+        "TradingBot23 Closed",
+        [
+            f"{symbol} closed | {reason.upper()}",
+            f"Entry ${entry_price:,.4f} -> Exit ${exit_price:,.4f}",
+            f"Net P&L {pnl_pct:+.2f}% ({pnl_usd:+.2f} USD)",
+            f"Portfolio ${portfolio:,.2f}",
+        ],
+        source="tradingbot23-futures",
+    )
     _send(
         f"{emoji} <b>TradingBot23 [{mode}] — CLOSED</b>\n"
         f"Coin: <b>{symbol}</b>  |  Reason: <b>{reason.upper()}</b>\n"
@@ -308,6 +329,15 @@ def alert_closed(symbol: str, entry_price: float, exit_price: float,
 
 def alert_crash(btc_change: float, positions_protected: int) -> None:
     mode = config.TRADING_MODE.upper()
+    ov.send_event(
+        "TradingBot23 Crash Mode",
+        [
+            f"BTC 24h change {btc_change:+.2f}%",
+            "New futures entries blocked.",
+            f"Emergency SL armed on {positions_protected} position(s).",
+        ],
+        source="tradingbot23-risk",
+    )
     _send(
         f"🚨 <b>TradingBot23 [{mode}] — CRASH MODE ACTIVATED</b>\n"
         f"BTC 24h change: <b>{btc_change:+.2f}%</b>\n"
@@ -319,6 +349,14 @@ def alert_crash(btc_change: float, positions_protected: int) -> None:
 
 def alert_crash_recovery(btc_change: float) -> None:
     mode = config.TRADING_MODE.upper()
+    ov.send_event(
+        "TradingBot23 Crash Lifted",
+        [
+            f"BTC 24h recovered to {btc_change:+.2f}%",
+            "Normal futures scanning resumed.",
+        ],
+        source="tradingbot23-risk",
+    )
     _send(
         f"✅ <b>TradingBot23 [{mode}] — CRASH MODE LIFTED</b>\n"
         f"BTC 24h change recovered to <b>{btc_change:+.2f}%</b>\n"
@@ -328,6 +366,14 @@ def alert_crash_recovery(btc_change: float) -> None:
 
 def alert_contribution(amount: float, cash: float, month: str) -> None:
     mode = config.TRADING_MODE.upper()
+    ov.send_event(
+        "TradingBot23 Contribution",
+        [
+            f"{month}: added ${amount:,.2f}",
+            f"Cash balance ${cash:,.2f}",
+        ],
+        source="tradingbot23-futures",
+    )
     _send(
         f"💵 <b>TradingBot23 [{mode}] — MONTHLY CONTRIBUTION</b>\n"
         f"Month: <b>{month}</b>\n"
@@ -339,6 +385,15 @@ def alert_contribution(amount: float, cash: float, month: str) -> None:
 def alert_summary(portfolio: float, cash: float, open_pos: int,
                   total_trades: int, win_rate: float, total_pnl_usd: float) -> None:
     mode = config.TRADING_MODE.upper()
+    ov.send_event(
+        "TradingBot23 Daily Summary",
+        [
+            f"Portfolio ${portfolio:,.2f} | Cash ${cash:,.2f}",
+            f"Open {open_pos} | Trades {total_trades} | Win {win_rate:.1f}%",
+            f"Total P&L {total_pnl_usd:+.2f} USD",
+        ],
+        source="tradingbot23-summary",
+    )
     _send(
         f"{_EMOJI['summary']} <b>TradingBot23 [{mode}] — Daily Summary</b>\n"
         f"Portfolio: <b>${portfolio:,.2f}</b>  |  Cash: ${cash:,.2f}\n"

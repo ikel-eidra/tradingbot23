@@ -20,6 +20,7 @@ import csv as _csv
 from bot import config
 import rebound_duration_analysis as rebound_analysis
 from bot.modules import accounting
+from bot.modules import ohverlay_notifier as ov
 from bot.modules import telegram_notifier as tg
 from bot.modules.event_ledger import EventLedger, append_event
 from bot.modules.futures_trader import _history_csv, recent_reset_sessions
@@ -117,6 +118,7 @@ SETTINGS_HELP = {
     "Monthly contribution ($)": "Paper cash to add once per month for contribution/compounding simulation.",
     "Contribution day": "Calendar day of month when the paper contribution is applied. If the month is shorter, the app uses the last valid day.",
     "Auto-start futures": "When enabled, futures scanning resumes automatically on app launch after settings are confirmed.",
+    "Ohverlay alerts": "Send short local bubble notifications to Ohverlay v4 via localhost webhook. Requires Ohverlay's Webhook Server to be enabled.",
 }
 
 RISK_HELP = {
@@ -1966,8 +1968,6 @@ class Dashboard:
         self._refresh_p2p_journal()
 
     def _maybe_send_p2p_assist_alert(self, settings: P2PRouteSettings):
-        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
-            return
         key = ""
         text = ""
         if self._p2p_sweep and self._p2p_sweep.profit_php > 0 and self._p2p_sweep.profit_pct >= settings.min_profit_pct:
@@ -2034,15 +2034,15 @@ class Dashboard:
         threading.Thread(target=worker, daemon=True).start()
 
     def _send_p2p_paper_event(self, title: str, lines: list[str]):
-        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
-            return
         if not hasattr(self, "_p2p_auto_alert") or not self._p2p_auto_alert.get():
             return
         text = "\n".join([
             f"🧾 <b>TradingBot23 P2P Paper - {tg.escape_html(title)}</b>",
             *lines,
         ])
-        tg.send_dashboard_text(text)
+        if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID:
+            tg.send_dashboard_text(text)
+        ov.send(text, title=f"TradingBot23 P2P Paper - {title}", source="tradingbot23-p2p")
 
     def _paper_cycle_now(self):
         if not self._p2p_last_snapshot:
@@ -2648,6 +2648,21 @@ class Dashboard:
         self._tip(auto_label, SETTINGS_HELP["Auto-start futures"])
         self._tip(auto_check, SETTINGS_HELP["Auto-start futures"])
 
+        self._s_ohverlay_enabled = tk.BooleanVar(value=config.OHVERLAY_ENABLED)
+        ohverlay_frame = tk.Frame(grid, bg="#0d1117")
+        ohverlay_frame.grid(row=12, column=1, sticky="w", padx=8, pady=4)
+        ohverlay_label = ttk.Label(grid, text="Ohverlay alerts", foreground="#8b949e", background="#0d1117",
+                                   font=("Consolas", 9), width=22)
+        ohverlay_label.grid(row=12, column=0, sticky="w", pady=4)
+        ohverlay_check = ttk.Checkbutton(ohverlay_frame, text="Enable bubbles", variable=self._s_ohverlay_enabled)
+        ohverlay_check.pack(side="left")
+        ohverlay_test = ttk.Button(ohverlay_frame, text="Test", style="Btn.TButton",
+                                   command=self._send_ohverlay_test)
+        ohverlay_test.pack(side="left", padx=(8, 0))
+        self._tip(ohverlay_label, SETTINGS_HELP["Ohverlay alerts"])
+        self._tip(ohverlay_check, SETTINGS_HELP["Ohverlay alerts"])
+        self._tip(ohverlay_test, "Send a test bubble to Ohverlay's local webhook using the current checkbox value.")
+
         # Apply button
         setup_msg = "" if self._settings_confirmed else "First run: review these values, then click Apply Settings."
         self._s_status = tk.StringVar(value=setup_msg)
@@ -2693,6 +2708,25 @@ class Dashboard:
         self.contrib_tree.pack(fill="x", anchor="n")
         self._update_contribution_schedule()
 
+    def _send_ohverlay_test(self):
+        previous = config.OHVERLAY_ENABLED
+        config.OHVERLAY_ENABLED = self._s_ohverlay_enabled.get()
+        try:
+            ov.send_event(
+                "TradingBot23 Test",
+                [
+                    "Ohverlay bubble notifications are connected.",
+                    "Enable Ohverlay's Webhook Server if no bubble appears.",
+                ],
+                source="tradingbot23-test",
+            )
+            self._s_status.set(
+                "Ohverlay test sent." if config.OHVERLAY_ENABLED
+                else "Ohverlay test skipped: checkbox is OFF."
+            )
+        finally:
+            config.OHVERLAY_ENABLED = previous
+
     def _apply_settings(self):
         try:
             capital   = float(self._s_capital.get())
@@ -2708,6 +2742,7 @@ class Dashboard:
             monthly_contribution = float(self._s_monthly_contribution.get())
             monthly_day = int(self._s_monthly_day.get())
             auto_start = self._s_auto_start.get()
+            ohverlay_enabled = self._s_ohverlay_enabled.get()
         except ValueError as e:
             self._s_status.set(f"Error: {e}")
             return
@@ -2756,6 +2791,7 @@ class Dashboard:
             "MONTHLY_CONTRIBUTION_USD": monthly_contribution,
             "MONTHLY_CONTRIBUTION_DAY": monthly_day,
             "AUTO_START_FUTURES": "true" if auto_start else "false",
+            "OHVERLAY_ENABLED": "true" if ohverlay_enabled else "false",
             "SETTINGS_CONFIRMED": "true",
         })
 
@@ -2775,6 +2811,7 @@ class Dashboard:
         config.MONTHLY_CONTRIBUTION_USD = monthly_contribution
         config.MONTHLY_CONTRIBUTION_DAY = monthly_day
         config.AUTO_START_FUTURES = auto_start
+        config.OHVERLAY_ENABLED = ohverlay_enabled
         config.SETTINGS_CONFIRMED = True
         self._settings_confirmed = True
         if max_open_trades != old_max_open_trades:
@@ -2793,7 +2830,7 @@ class Dashboard:
             f"Applied!  Leverage: {leverage}x  |  Max open: {max_open_trades}  |  "
             f"Pretrade: {'ON' if pretrade_enabled else 'OFF'} {pretrade_score:.0f}  |  "
             f"TP: {tp_pct*100:.2f}%  |  SL: {'ON' if sl_on else 'OFF'}  |  "
-            f"Add ${monthly_contribution:.2f}/mo"
+            f"Add ${monthly_contribution:.2f}/mo  |  Ohverlay: {'ON' if ohverlay_enabled else 'OFF'}"
             f"{capital_note}")
         self._refresh_summary()
         self._update_contribution_schedule()

@@ -1,6 +1,6 @@
 # TradingBot23
 
-**Automated crypto futures mean-reversion bot with a paper trading GUI, persistent trade history, and Telegram alerts.**
+**Automated crypto futures mean-reversion bot with a paper trading GUI, persistent trade history, Telegram alerts, and optional Ohverlay desktop bubbles.**
 
 Runs on Windows as a standalone EXE — no Python, no coding required for end users.
 
@@ -106,6 +106,7 @@ tradingbot23/
 │       ├── p2p_monitor.py         # Read-only Binance P2P USDT/PHP spread monitor
 │       ├── strategy.py            # Basket logic, dip detection, fill_empty_slots
 │       ├── telegram_notifier.py   # Trade alerts via Telegram bot
+│       ├── ohverlay_notifier.py   # Optional localhost Ohverlay bubble bridge
 │       └── backtester.py          # Historical simulation using Binance klines
 ├── data/                          # Monthly snapshots (JSON) + trade_history.csv
 ├── logs/                          # Daily log files
@@ -187,6 +188,22 @@ All settings live in `.env`. The Settings tab in the GUI lets you change most of
 - `/p2p` or the **P2P Arb** button for live USDT/PHP route and paper ledger figures
 - `/info` for the automation scope and manual P2P safety notes
 
+### Ohverlay Bubble Alerts (Optional)
+
+TradingBot23 can send short local notifications to Ohverlay v4 fish/bubble overlays. This uses only Ohverlay's localhost webhook; no exchange keys, Telegram tokens, or live-trading controls are sent.
+
+| Variable | Default | Description |
+|---|---|---|
+| `OHVERLAY_ENABLED` | `false` | Enable TradingBot23 to Ohverlay bubble alerts |
+| `OHVERLAY_WEBHOOK_URL` | `http://127.0.0.1:7277/message` | Local Ohverlay webhook endpoint |
+| `OHVERLAY_SENDER` | `TradingBot23` | Sender label shown by Ohverlay |
+| `OHVERLAY_MAX_CHARS` | `420` | Max bubble message length |
+
+**Setup:**
+1. Open Ohverlay v4.
+2. From the Ohverlay tray menu, enable **Webhook Server**.
+3. In TradingBot23 Settings, enable **Ohverlay alerts**, click **Apply Settings**, then click **Test**.
+
 ---
 
 ## Persistent Trade History
@@ -235,7 +252,7 @@ P2P controls are durable. When valid P2P settings are used for refresh, recalcul
 | 500K Sweep | Simulates splitting a PHP amount across multiple real buy/sell listings with weighted average prices |
 | Paper Arb | Compounds a local paper PHP balance from profitable live-listing depth sweeps; stored in `data/p2p_paper_arb.json` |
 | Paper Hold | Buys paper USDT now, keeps one open inventory position, and auto-sells when the configured net profit threshold is reached |
-| Live Assist | Can alert Telegram and auto-log watchlist routes without changing the paper balance |
+| Live Assist | Can alert Telegram/Ohverlay and auto-log watchlist routes without changing the paper balance |
 | Route Grade | A/B/C/WATCH/REVIEW label based on estimated return and counterparty filters |
 | Journal | Logs the top route to `data/p2p_cycle_journal.csv` for manual cycle tracking |
 | Transaction History | Records reset, capital adjustment, paper cycle, hold buy, and hold sell rows in `data/p2p_transaction_history.csv` |
@@ -250,7 +267,7 @@ The route and paper-hold estimates are informational only. The app does not plac
 | Paper Sim (Live Data) | Paper Buy+Sell | Simulates buy and sell from the same live listing snapshot. If net profit meets the threshold, PHP profit is added immediately and no USDT remains open. |
 | Paper Sim (Live Data) | Paper Buy Hold | Simulates buying USDT from current live seller ads. Paper cash goes down, hold USDT appears, and the app waits for a later sell-side quote. |
 | Paper Sim (Live Data) | Check/Sell Hold | Marks the open paper hold against current live buyer prices. It closes only when the configured net profit threshold is reached. |
-| Paper Sim (Live Data) | TG Alerts | Sends paper buy/sell/hold events to Telegram when enabled. |
+| Paper Sim (Live Data) | TG Alerts | Sends paper buy/sell/hold events to enabled alert channels. |
 | Paper Sim (Live Data) | Recalculate Only | Refreshes route math only. It never records a paper transaction. |
 | Paper Sim (Live Data) | Auto Cycle | Runs only after fresh P2P listing refreshes and skips repeated fills when the listing set is unchanged. |
 | Live Assist | Send Live Snapshot | Sends the current P2P dashboard to Telegram. No balances change. |
