@@ -313,6 +313,20 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertEqual(closed[0].status, FuturesPositionStatus.SL_HIT)
         self.assertLess(closed[0].pnl_pct, 0)
 
+    def test_crash_protected_stop_uses_crash_sl_reason(self):
+        config.FUTURES_USE_SL = False
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            pos = self.trader.open_position("ETH", margin_usd=1000)
+        pos.crash_protected = True
+        pos.sl_price = 98.0
+
+        with patch.object(self.trader, "get_current_price", return_value=97.0):
+            closed = self.trader.check_positions()
+
+        self.assertEqual(closed[0].status, FuturesPositionStatus.CRASH_SL_HIT)
+        self.assertEqual(closed[0].exit_price, 98.0)
+        self.assertLess(closed[0].pnl_pct, 0)
+
     def test_liquidation(self):
         with patch.object(self.trader, "get_current_price", return_value=100.0):
             pos = self.trader.open_position("ETH", margin_usd=9500)

@@ -321,6 +321,7 @@ class FuturesPositionStatus(str, Enum):
     OPEN = "open"
     TP_HIT = "tp_hit"
     SL_HIT = "sl_hit"
+    CRASH_SL_HIT = "crash_sl"
     EXPIRED = "expired"
     LIQUIDATED = "liquidated"
     EXCLUDED = "excluded"
@@ -779,7 +780,11 @@ class FuturesTrader:
         # Loss cooldown: skip if recent SL or LIQUIDATION on this symbol
         if config.LOSS_COOLDOWN_HOURS > 0:
             cooldown = timedelta(hours=config.LOSS_COOLDOWN_HOURS)
-            loss_states = (FuturesPositionStatus.SL_HIT, FuturesPositionStatus.LIQUIDATED)
+            loss_states = (
+                FuturesPositionStatus.SL_HIT,
+                FuturesPositionStatus.CRASH_SL_HIT,
+                FuturesPositionStatus.LIQUIDATED,
+            )
             for pos in self.positions:
                 if (
                     pos.symbol == symbol
@@ -971,7 +976,12 @@ class FuturesTrader:
                         pos.breakeven_armed = True
 
                 if price <= pos.sl_price:
-                    self._close(pos, pos.sl_price, FuturesPositionStatus.SL_HIT, now)
+                    reason = (
+                        FuturesPositionStatus.CRASH_SL_HIT
+                        if pos.crash_protected
+                        else FuturesPositionStatus.SL_HIT
+                    )
+                    self._close(pos, pos.sl_price, reason, now)
                     closed.append(pos)
                     continue
 

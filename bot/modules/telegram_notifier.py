@@ -30,6 +30,7 @@ ControlCallback = Callable[[str], str]
 _EMOJI = {
     "tp_hit":    "✅",
     "sl_hit":    "❌",
+    "crash_sl":  "🚨",
     "expired":   "⏰",
     "liquidated":"💀",
     "open":      "🟢",

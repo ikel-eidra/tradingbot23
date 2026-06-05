@@ -910,7 +910,7 @@ class Dashboard:
                 reasons[r] += 1
             labels = list(reasons.keys())
             sizes  = list(reasons.values())
-            colors = {"tp_hit":"#3fb950","sl_hit":"#f85149",
+            colors = {"tp_hit":"#3fb950","sl_hit":"#f85149","crash_sl":"#f0883e",
                       "expired":"#e3b341","liquidated":"#ff6b6b",
                       "month_end":"#8b949e"}
             clrs = [colors.get(l, "#58a6ff") for l in labels]
