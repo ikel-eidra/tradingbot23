@@ -29,6 +29,10 @@ class TestStrategy(unittest.TestCase):
         config.PAPER_SYMBOL_GUARD_MAX_REALIZED_LOSS_USD = 50
         config.PAPER_SYMBOL_GUARD_EXPIRED_LOSS_USD = 25
         config.PAPER_SYMBOL_GUARD_BLOCK_LIQUIDATED = True
+        config.CRASH_ENTRY_GUARD_ENABLED = True
+        config.CRASH_EMERGENCY_SL_ENABLED = False
+        config.CRASH_BTC_TRIGGER_PCT = -0.04
+        config.CRASH_BTC_RECOVERY_PCT = -0.02
 
     def test_execute_signals_respects_max_open_slots(self):
         """Should not open more positions than the configured basket slots."""
@@ -497,6 +501,71 @@ class TestStrategy(unittest.TestCase):
         strategy = Strategy()
         dips = strategy.detect_dips_from_prices({"BTC": {"price": 60000, "change_pct": -5.0}})
         self.assertEqual(dips, [])
+
+    def test_crash_guard_does_not_arm_emergency_sl_when_disabled(self):
+        """Crash mode can block entries without secretly acting as stop-loss."""
+
+        class FakeFetcher:
+            def get_top_coins(self):
+                return [{"symbol": "BTC", "percent_change_24h": -5.0}]
+
+        class FakeTrader:
+            def __init__(self):
+                self.arm_calls = 0
+
+            def arm_crash_sl(self):
+                self.arm_calls += 1
+                return 3
+
+        config.CRASH_ENTRY_GUARD_ENABLED = True
+        config.CRASH_EMERGENCY_SL_ENABLED = False
+        trader = FakeTrader()
+        strategy = Strategy(fetcher=FakeFetcher(), trader=trader)
+
+        strategy._update_crash_mode()
+
+        self.assertTrue(strategy._crash_mode)
+        self.assertEqual(trader.arm_calls, 0)
+
+    def test_crash_guard_arms_emergency_sl_only_when_enabled(self):
+        """Emergency crash SL is explicit and separate from entry blocking."""
+
+        class FakeFetcher:
+            def get_top_coins(self):
+                return [{"symbol": "BTC", "percent_change_24h": -5.0}]
+
+        class FakeTrader:
+            def __init__(self):
+                self.arm_calls = 0
+
+            def arm_crash_sl(self):
+                self.arm_calls += 1
+                return 2
+
+        config.CRASH_ENTRY_GUARD_ENABLED = True
+        config.CRASH_EMERGENCY_SL_ENABLED = True
+        trader = FakeTrader()
+        strategy = Strategy(fetcher=FakeFetcher(), trader=trader)
+
+        strategy._update_crash_mode()
+
+        self.assertTrue(strategy._crash_mode)
+        self.assertEqual(trader.arm_calls, 1)
+
+    def test_disabled_crash_guard_clears_crash_mode(self):
+        """Turning off the entry guard should not leave the strategy blocked."""
+
+        class FakeFetcher:
+            def get_top_coins(self):
+                raise AssertionError("fetcher should not be called when guard is disabled")
+
+        config.CRASH_ENTRY_GUARD_ENABLED = False
+        strategy = Strategy(fetcher=FakeFetcher())
+        strategy._crash_mode = True
+
+        strategy._update_crash_mode()
+
+        self.assertFalse(strategy._crash_mode)
 
 
 if __name__ == "__main__":

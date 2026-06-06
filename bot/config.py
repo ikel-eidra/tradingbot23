@@ -155,12 +155,16 @@ FUTURES_USE_SL = os.getenv("FUTURES_USE_SL", "false").lower() == "true"
 FUTURES_DIP_THRESHOLD_PCT = float(os.getenv("FUTURES_DIP_THRESHOLD_PCT", "0.005"))  # -0.5% in 5m
 
 # --- Crash Detection ---
-# BTC 24h drop below this triggers crash mode: blocks entries + arms emergency SL.
+# Entry guard blocks new longs during broad BTC dumps. Emergency SL is separate
+# because it force-closes existing positions and therefore behaves like an SL.
+CRASH_ENTRY_GUARD_ENABLED = os.getenv("CRASH_ENTRY_GUARD_ENABLED", "true").lower() == "true"
+CRASH_EMERGENCY_SL_ENABLED = os.getenv("CRASH_EMERGENCY_SL_ENABLED", "false").lower() == "true"
+# BTC 24h drop below this triggers crash mode when the entry guard is enabled.
 # 20x paper exposure needs an earlier guard than historical full-crash thresholds.
 CRASH_BTC_TRIGGER_PCT = float(os.getenv("CRASH_BTC_TRIGGER_PCT", "-0.04"))
 # BTC 24h must recover above this before normal trading resumes (hysteresis gap).
 CRASH_BTC_RECOVERY_PCT = float(os.getenv("CRASH_BTC_RECOVERY_PCT", "-0.02"))
-# Emergency SL is set this far below current price when crash mode activates.
+# Emergency SL is set this far below current price only when explicitly enabled.
 # 1.5% below current protects 20x paper margin while allowing small bounces.
 CRASH_SL_PCT = float(os.getenv("CRASH_SL_PCT", "0.015"))
 

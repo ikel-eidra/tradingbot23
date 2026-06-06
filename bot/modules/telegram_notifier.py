@@ -328,23 +328,38 @@ def alert_closed(symbol: str, entry_price: float, exit_price: float,
     )
 
 
-def alert_crash(btc_change: float, positions_protected: int) -> None:
+def alert_crash(
+    btc_change: float,
+    positions_protected: int,
+    *,
+    emergency_sl_enabled: bool = True,
+) -> None:
     mode = config.TRADING_MODE.upper()
+    emergency_line = (
+        f"Emergency SL armed on {positions_protected} position(s)."
+        if emergency_sl_enabled
+        else "Emergency SL is OFF; existing positions keep normal exits."
+    )
     ov.send_event(
         "TradingBot23 Crash Mode",
         [
             f"BTC 24h change {btc_change:+.2f}%",
             "New futures entries blocked.",
-            f"Emergency SL armed on {positions_protected} position(s).",
+            emergency_line,
         ],
         source="tradingbot23-risk",
+    )
+    emergency_text = (
+        f"Emergency SL armed on <b>{positions_protected}</b> open position(s)"
+        if emergency_sl_enabled
+        else "Emergency SL is <b>OFF</b>; existing positions keep normal exits/cross liquidation"
     )
     _send(
         f"🚨 <b>TradingBot23 [{mode}] — CRASH MODE ACTIVATED</b>\n"
         f"BTC 24h change: <b>{btc_change:+.2f}%</b>\n"
         f"All new entries BLOCKED\n"
-        f"Emergency SL armed on <b>{positions_protected}</b> open position(s)\n"
-        f"Will resume when BTC recovers above -5% 24h"
+        f"{emergency_text}\n"
+        f"Will resume when BTC recovers above {config.CRASH_BTC_RECOVERY_PCT * 100:+.1f}% 24h"
     )
 
 

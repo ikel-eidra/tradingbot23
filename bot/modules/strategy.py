@@ -529,6 +529,12 @@ class Strategy:
 
     def _update_crash_mode(self) -> None:
         """Check BTC 24h change and toggle crash mode accordingly."""
+        if not config.CRASH_ENTRY_GUARD_ENABLED:
+            if self._crash_mode:
+                logger.info("[CRASH-MODE] LIFTED — entry guard disabled in settings")
+            self._crash_mode = False
+            return
+
         try:
             fresh_coins = self.fetcher.get_top_coins()
         except Exception:
@@ -550,8 +556,16 @@ class Strategy:
                 btc_change * 100, config.CRASH_BTC_TRIGGER_PCT * 100,
             )
             if self.is_futures:
-                protected = self.trader.arm_crash_sl()
-                tg.alert_crash(btc_change * 100, protected)
+                protected = (
+                    self.trader.arm_crash_sl()
+                    if config.CRASH_EMERGENCY_SL_ENABLED
+                    else 0
+                )
+                tg.alert_crash(
+                    btc_change * 100,
+                    protected,
+                    emergency_sl_enabled=config.CRASH_EMERGENCY_SL_ENABLED,
+                )
 
         elif self._crash_mode and btc_change > config.CRASH_BTC_RECOVERY_PCT:
             self._crash_mode = False

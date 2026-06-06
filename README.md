@@ -147,7 +147,9 @@ All settings live in `.env`. The Settings tab in the GUI lets you change most of
 | `FUTURES_USE_SL` | `false` | Enable hard stop-loss (disabled by default) |
 | `MAX_HOLD_DAYS` | `3` | Auto-close after N days |
 | `DIP_THRESHOLD_PCT` | `0.02` | Entry trigger: −2% 24h change |
-| `CRASH_BTC_TRIGGER_PCT` | `-0.04` | BTC 24h move that blocks new entries and arms emergency crash SL |
+| `CRASH_ENTRY_GUARD_ENABLED` | `true` | Block new futures entries during a BTC crash |
+| `CRASH_EMERGENCY_SL_ENABLED` | `false` | Arm emergency crash SL on existing positions; this behaves like an SL |
+| `CRASH_BTC_TRIGGER_PCT` | `-0.04` | BTC 24h move that activates the crash entry guard |
 | `CRASH_BTC_RECOVERY_PCT` | `-0.02` | BTC 24h recovery level required before crash mode lifts |
 | `CRASH_SL_PCT` | `0.015` | Emergency crash SL distance below current price |
 | `AUTO_START_FUTURES` | `false` | New installs open paused so futures paper trades do not auto-open until Resume is pressed |

@@ -958,11 +958,12 @@ class FuturesTrader:
                 closed.append(pos)
                 continue
 
-            if config.FUTURES_USE_SL or pos.crash_protected:
+            crash_stop_active = pos.crash_protected and config.CRASH_EMERGENCY_SL_ENABLED
+            normal_stop_active = config.FUTURES_USE_SL and not pos.crash_protected
+            if normal_stop_active or crash_stop_active:
                 # Optional break-even trailing SL (only in normal mode, not crash)
                 if (
-                    config.FUTURES_USE_SL
-                    and not pos.crash_protected
+                    normal_stop_active
                     and not pos.breakeven_armed
                     and config.BREAK_EVEN_TRIGGER_PCT > 0
                     and price >= pos.entry_price * (1 + config.BREAK_EVEN_TRIGGER_PCT)
@@ -978,7 +979,7 @@ class FuturesTrader:
                 if price <= pos.sl_price:
                     reason = (
                         FuturesPositionStatus.CRASH_SL_HIT
-                        if pos.crash_protected
+                        if crash_stop_active
                         else FuturesPositionStatus.SL_HIT
                     )
                     self._close(pos, pos.sl_price, reason, now)

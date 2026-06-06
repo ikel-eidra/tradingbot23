@@ -41,6 +41,7 @@ class TestFuturesTrader(unittest.TestCase):
         config.FUTURES_NET_TP_PCT = 0.005
         config.FUTURES_NET_SL_PCT = 0.0075
         config.FUTURES_USE_SL = True
+        config.CRASH_EMERGENCY_SL_ENABLED = False
         config.MAX_HOLD_DAYS = 3
         config.BREAK_EVEN_TRIGGER_PCT = 0.005
         config.LOSS_COOLDOWN_HOURS = 24
@@ -315,6 +316,7 @@ class TestFuturesTrader(unittest.TestCase):
 
     def test_crash_protected_stop_uses_crash_sl_reason(self):
         config.FUTURES_USE_SL = False
+        config.CRASH_EMERGENCY_SL_ENABLED = True
         with patch.object(self.trader, "get_current_price", return_value=100.0):
             pos = self.trader.open_position("ETH", margin_usd=1000)
         pos.crash_protected = True
@@ -326,6 +328,20 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertEqual(closed[0].status, FuturesPositionStatus.CRASH_SL_HIT)
         self.assertEqual(closed[0].exit_price, 98.0)
         self.assertLess(closed[0].pnl_pct, 0)
+
+    def test_crash_protected_stop_is_ignored_when_emergency_sl_disabled(self):
+        config.FUTURES_USE_SL = False
+        config.CRASH_EMERGENCY_SL_ENABLED = False
+        with patch.object(self.trader, "get_current_price", return_value=100.0):
+            pos = self.trader.open_position("ETH", margin_usd=1000)
+        pos.crash_protected = True
+        pos.sl_price = 98.0
+
+        with patch.object(self.trader, "get_current_price", return_value=97.0):
+            closed = self.trader.check_positions()
+
+        self.assertEqual(closed, [])
+        self.assertEqual(pos.status, FuturesPositionStatus.OPEN)
 
     def test_liquidation(self):
         with patch.object(self.trader, "get_current_price", return_value=100.0):
