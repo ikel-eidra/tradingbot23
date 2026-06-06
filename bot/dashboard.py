@@ -111,6 +111,7 @@ SETTINGS_HELP = {
     "TP target (% net)": "Net take-profit target on margin after estimated fees and funding. The app calculates the required price move for each new trade.",
     "Stop Loss": "Optional hard stop-loss. When disabled, positions rely on TP, max-hold expiry, and cross-margin liquidation tracking.",
     "Crash protection": "Block entries pauses new futures longs when BTC is dumping. Emergency SL force-closes existing positions during crash mode, so use it only when you intentionally want an anti-crash stop.",
+    "BTC filter (% 1h)": "Market-regime gate for long entries. Example: -1.5 blocks new trades when BTC is down 1.5% or worse over roughly 1 hour. Blank or 'none' disables it.",
     "Max hold (days)": "Maximum age of a futures paper position before it is closed at market in the simulation.",
     "Per trade (% of portfolio)": "Margin size for each new trade as a percent of current paper portfolio value. This is margin, not leveraged notional.",
     "Max open trades": "Maximum simultaneous futures paper positions. Lowering this does not force-close existing trades; it only blocks new entries until open count drops.",
@@ -2599,21 +2600,30 @@ class Dashboard:
         self._tip(crash_entry_check, "Pauses new futures entries while BTC 24h change is below the crash threshold. Existing positions are not closed by this setting.")
         self._tip(crash_sl_check, "Optional anti-crash stop. When enabled, crash mode sets an emergency SL on existing open positions; this behaves like an SL.")
 
+        # BTC market-regime filter
+        btc_filter_value = (
+            ""
+            if config.BTC_REGIME_FILTER_PCT is None
+            else str(round(config.BTC_REGIME_FILTER_PCT * 100, 2))
+        )
+        self._s_btc_regime_filter = tk.StringVar(value=btc_filter_value)
+        row("BTC filter (% 1h)", lambda p: field(p, self._s_btc_regime_filter, 8), 5)
+
         # Max hold days
         self._s_hold = tk.StringVar(value=str(config.MAX_HOLD_DAYS))
-        row("Max hold (days)", lambda p: field(p, self._s_hold, 8), 5)
+        row("Max hold (days)", lambda p: field(p, self._s_hold, 8), 6)
 
         # Per trade %
         self._s_per_trade = tk.StringVar(value=str(round(config.PER_TRADE_PCT * 100, 0)))
-        row("Per trade (% of portfolio)", lambda p: field(p, self._s_per_trade, 8), 6)
+        row("Per trade (% of portfolio)", lambda p: field(p, self._s_per_trade, 8), 7)
 
         # Maximum simultaneous futures trades
         self._s_max_open_trades = tk.IntVar(value=config.MAX_OPEN_TRADES)
         max_open_frame = tk.Frame(grid, bg="#0d1117")
-        max_open_frame.grid(row=7, column=1, sticky="w", padx=8, pady=4)
+        max_open_frame.grid(row=8, column=1, sticky="w", padx=8, pady=4)
         max_open_label = ttk.Label(grid, text="Max open trades", foreground="#8b949e", background="#0d1117",
                                    font=("Consolas", 9), width=22)
-        max_open_label.grid(row=7, column=0, sticky="w", pady=4)
+        max_open_label.grid(row=8, column=0, sticky="w", pady=4)
         max_open_spin = tk.Spinbox(
             max_open_frame,
             from_=1,
@@ -2643,31 +2653,31 @@ class Dashboard:
         # Pre-trade wave analysis
         self._s_pretrade_enabled = tk.BooleanVar(value=config.PRE_TRADE_ANALYSIS_ENABLED)
         pretrade_frame = tk.Frame(grid, bg="#0d1117")
-        pretrade_frame.grid(row=8, column=1, sticky="w", padx=8, pady=4)
+        pretrade_frame.grid(row=9, column=1, sticky="w", padx=8, pady=4)
         pretrade_label = ttk.Label(grid, text="Pre-trade wave check", foreground="#8b949e", background="#0d1117",
                                    font=("Consolas", 9), width=22)
-        pretrade_label.grid(row=8, column=0, sticky="w", pady=4)
+        pretrade_label.grid(row=9, column=0, sticky="w", pady=4)
         pretrade_check = ttk.Checkbutton(pretrade_frame, text="Enable", variable=self._s_pretrade_enabled)
         pretrade_check.pack(side="left")
         self._tip(pretrade_label, SETTINGS_HELP["Pre-trade wave check"])
         self._tip(pretrade_check, SETTINGS_HELP["Pre-trade wave check"])
 
         self._s_pretrade_score = tk.StringVar(value=str(round(config.PRE_TRADE_MIN_SCORE, 0)))
-        row("Min pre-trade score", lambda p: field(p, self._s_pretrade_score, 8), 9)
+        row("Min pre-trade score", lambda p: field(p, self._s_pretrade_score, 8), 10)
 
         # Monthly contribution
         self._s_monthly_contribution = tk.StringVar(value=str(round(config.MONTHLY_CONTRIBUTION_USD, 2)))
-        row("Monthly contribution ($)", lambda p: field(p, self._s_monthly_contribution, 8), 10)
+        row("Monthly contribution ($)", lambda p: field(p, self._s_monthly_contribution, 8), 11)
 
         self._s_monthly_day = tk.StringVar(value=str(config.MONTHLY_CONTRIBUTION_DAY))
-        row("Contribution day", lambda p: field(p, self._s_monthly_day, 8), 11)
+        row("Contribution day", lambda p: field(p, self._s_monthly_day, 8), 12)
 
         self._s_auto_start = tk.BooleanVar(value=config.AUTO_START_FUTURES)
         auto_frame = tk.Frame(grid, bg="#0d1117")
-        auto_frame.grid(row=12, column=1, sticky="w", padx=8, pady=4)
+        auto_frame.grid(row=13, column=1, sticky="w", padx=8, pady=4)
         auto_label = ttk.Label(grid, text="Auto-start futures", foreground="#8b949e", background="#0d1117",
                                font=("Consolas", 9), width=22)
-        auto_label.grid(row=12, column=0, sticky="w", pady=4)
+        auto_label.grid(row=13, column=0, sticky="w", pady=4)
         auto_check = ttk.Checkbutton(auto_frame, text="Enable on launch", variable=self._s_auto_start)
         auto_check.pack(side="left")
         self._tip(auto_label, SETTINGS_HELP["Auto-start futures"])
@@ -2675,10 +2685,10 @@ class Dashboard:
 
         self._s_ohverlay_enabled = tk.BooleanVar(value=config.OHVERLAY_ENABLED)
         ohverlay_frame = tk.Frame(grid, bg="#0d1117")
-        ohverlay_frame.grid(row=13, column=1, sticky="w", padx=8, pady=4)
+        ohverlay_frame.grid(row=14, column=1, sticky="w", padx=8, pady=4)
         ohverlay_label = ttk.Label(grid, text="Ohverlay alerts", foreground="#8b949e", background="#0d1117",
                                    font=("Consolas", 9), width=22)
-        ohverlay_label.grid(row=13, column=0, sticky="w", pady=4)
+        ohverlay_label.grid(row=14, column=0, sticky="w", pady=4)
         ohverlay_check = ttk.Checkbutton(ohverlay_frame, text="Enable bubbles", variable=self._s_ohverlay_enabled)
         ohverlay_check.pack(side="left")
         ohverlay_test = ttk.Button(ohverlay_frame, text="Test", style="Btn.TButton",
@@ -2761,6 +2771,12 @@ class Dashboard:
             sl_pct    = float(self._s_sl.get()) / 100
             crash_entry_guard = self._s_crash_entry_guard.get()
             crash_emergency_sl = self._s_crash_emergency_sl.get()
+            btc_filter_raw = self._s_btc_regime_filter.get().strip()
+            btc_regime_filter = (
+                None
+                if btc_filter_raw.lower() in {"", "none", "off"}
+                else float(btc_filter_raw) / 100
+            )
             hold_days = int(self._s_hold.get())
             per_trade = float(self._s_per_trade.get()) / 100
             max_open_trades = int(self._s_max_open_trades.get())
@@ -2812,6 +2828,7 @@ class Dashboard:
             "FUTURES_USE_SL":     "true" if sl_on else "false",
             "CRASH_ENTRY_GUARD_ENABLED": "true" if crash_entry_guard else "false",
             "CRASH_EMERGENCY_SL_ENABLED": "true" if crash_emergency_sl else "false",
+            "BTC_REGIME_FILTER_PCT": "none" if btc_regime_filter is None else btc_regime_filter,
             "MAX_HOLD_DAYS":      hold_days,
             "PER_TRADE_PCT":      per_trade,
             "MAX_OPEN_TRADES":    max_open_trades,
@@ -2832,6 +2849,7 @@ class Dashboard:
         config.FUTURES_USE_SL     = sl_on
         config.CRASH_ENTRY_GUARD_ENABLED = crash_entry_guard
         config.CRASH_EMERGENCY_SL_ENABLED = crash_emergency_sl
+        config.BTC_REGIME_FILTER_PCT = btc_regime_filter
         config.MAX_HOLD_DAYS      = hold_days
         config.PER_TRADE_PCT      = per_trade
         old_max_open_trades = config.MAX_OPEN_TRADES
@@ -2863,6 +2881,7 @@ class Dashboard:
             f"TP: {tp_pct*100:.2f}%  |  SL: {'ON' if sl_on else 'OFF'}  |  "
             f"Crash: {'GUARD' if crash_entry_guard else 'OFF'}/"
             f"{'SL' if crash_emergency_sl else 'NO-SL'}  |  "
+            f"BTC: {'OFF' if btc_regime_filter is None else f'{btc_regime_filter*100:+.2f}%'}  |  "
             f"Add ${monthly_contribution:.2f}/mo  |  Ohverlay: {'ON' if ohverlay_enabled else 'OFF'}"
             f"{capital_note}")
         self._refresh_summary()
@@ -3543,6 +3562,12 @@ class Dashboard:
         secs_left = max(0, int(self._next_cycle_ts - time.time()))
         m, sec    = divmod(secs_left, 60)
         countdown = f"{m:02d}:{sec:02d}"
+        if s.get("market_regime_blocked"):
+            self.status_var.set(
+                f"Market regime guard active; monitoring exits only: "
+                f"{s.get('market_regime_reason', '')}  |  Next scan: {countdown}"
+            )
+            return
         self.status_var.set(
             f"Last: {last} UTC  |  Next scan: {countdown}  |  "
             f"Dips: {s.get('dips_found',0)}  "

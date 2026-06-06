@@ -33,6 +33,7 @@ class TestStrategy(unittest.TestCase):
         config.CRASH_EMERGENCY_SL_ENABLED = False
         config.CRASH_BTC_TRIGGER_PCT = -0.04
         config.CRASH_BTC_RECOVERY_PCT = -0.02
+        config.BTC_REGIME_FILTER_PCT = -0.015
 
     def test_execute_signals_respects_max_open_slots(self):
         """Should not open more positions than the configured basket slots."""
@@ -526,6 +527,76 @@ class TestStrategy(unittest.TestCase):
 
         self.assertTrue(strategy._crash_mode)
         self.assertEqual(trader.arm_calls, 0)
+
+    def test_market_regime_blocks_new_entries_when_btc_is_weak(self):
+        """A broad BTC slide should block fresh long entries without touching exits."""
+
+        class FakeFetcher:
+            def get_top_coins(self):
+                return [{"symbol": "BTC", "percent_change_24h": -1.0}]
+
+        class FakeTrader:
+            cash_balance = 1000
+
+            def __init__(self):
+                self.open_calls = 0
+                self.check_calls = 0
+
+            def apply_monthly_contribution(self, now=None):
+                return 0.0
+
+            def check_positions(self):
+                self.check_calls += 1
+                return []
+
+            def get_kline_window_change(self, symbol, interval="15m", limit=5):
+                return -2.0
+
+            def get_open_positions(self):
+                return []
+
+            def get_stats(self):
+                return {"total_trades": 0, "win_rate": 0}
+
+            def get_portfolio_value(self):
+                return 1000.0
+
+            def open_position(self, *args, **kwargs):
+                self.open_calls += 1
+                raise AssertionError("market regime should block entries before opening")
+
+        trader = FakeTrader()
+        strategy = Strategy(fetcher=FakeFetcher(), trader=trader)
+        now = datetime.now(timezone.utc)
+        strategy.basket = [{"symbol": "AAA", "cmc_rank": 10}]
+        strategy.basket_month = now.month
+        strategy.basket_year = now.year
+
+        summary = strategy.run_cycle()
+
+        self.assertTrue(summary["market_regime_blocked"])
+        self.assertEqual(summary["positions_opened"], 0)
+        self.assertEqual(summary["slots_filled"], 0)
+        self.assertEqual(trader.check_calls, 1)
+        self.assertEqual(trader.open_calls, 0)
+        self.assertEqual(strategy.last_pre_trade_decisions[0]["source"], "market_regime")
+        self.assertEqual(strategy.last_pre_trade_decisions[0]["decision"], "WAIT")
+
+    def test_market_regime_filter_allows_entries_when_disabled(self):
+        """Setting BTC_REGIME_FILTER_PCT to None disables the market gate."""
+
+        class FakeTrader:
+            def get_kline_window_change(self, *args, **kwargs):
+                raise AssertionError("disabled filter should not request BTC klines")
+
+        config.BTC_REGIME_FILTER_PCT = None
+        strategy = Strategy(trader=FakeTrader())
+
+        allowed, reason, change = strategy._market_regime_entry_decision()
+
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "BTC regime filter disabled")
+        self.assertIsNone(change)
 
     def test_crash_guard_arms_emergency_sl_only_when_enabled(self):
         """Emergency crash SL is explicit and separate from entry blocking."""

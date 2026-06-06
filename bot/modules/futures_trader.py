@@ -651,6 +651,33 @@ class FuturesTrader:
             return None
         return ((curr_close - prev_close) / prev_close) * 100
 
+    def get_kline_window_change(
+        self,
+        symbol: str,
+        *,
+        interval: str = "15m",
+        limit: int = 5,
+    ) -> float | None:
+        """Compute close-to-close % change across a small kline window."""
+        pair = self._trading_pair(symbol)
+        try:
+            klines = self.client.futures_klines(
+                symbol=pair, interval=interval, limit=limit,
+            )
+        except BinanceAPIException:
+            try:
+                klines = self.client.get_klines(
+                    symbol=pair, interval=interval, limit=limit,
+                )
+            except BinanceAPIException as e:
+                logger.debug("No kline window data for %s: %s", pair, e)
+                return None
+
+        closes = [float(k[4]) for k in klines if float(k[4]) > 0]
+        if len(closes) < 2 or closes[0] <= 0:
+            return None
+        return ((closes[-1] - closes[0]) / closes[0]) * 100
+
     def pre_trade_analysis(self, symbol: str) -> PreTradeAnalysis:
         """Analyze 24h wave structure before a new futures paper entry."""
         pair = self._trading_pair(symbol)

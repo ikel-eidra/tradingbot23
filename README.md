@@ -166,6 +166,7 @@ All settings live in `.env`. The Settings tab in the GUI lets you change most of
 | `PRE_TRADE_MAX_24H_DROP_PCT` | `8.0` | Breakdown guard threshold for deep 24h drops |
 | `PRE_TRADE_MAX_LOWER_CLOSE_STREAK` | `5` | Blocks repeated lower 15m closes, a falling-knife pattern |
 | `PRE_TRADE_MAX_BELOW_SMA20_PCT` | `1.5` | Blocks coins too far below a falling 20-candle average |
+| `BTC_REGIME_FILTER_PCT` | `-0.015` | Blocks new long entries when BTC is down 1.5% or worse over roughly 1 hour; set `none` to disable |
 | `PAPER_SYMBOL_GUARD_ENABLED` | `true` | Uses local paper history to quarantine symbols with recent large realized losses |
 | `PAPER_SYMBOL_GUARD_MAX_REALIZED_LOSS_USD` | `50` | Blocks a symbol if recent realized P&L is below this loss |
 | `PAPER_SYMBOL_GUARD_BLOCK_LIQUIDATED` | `true` | Blocks a symbol after a recent paper liquidation |

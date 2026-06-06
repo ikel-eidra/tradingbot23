@@ -103,6 +103,20 @@ class TestFuturesTrader(unittest.TestCase):
         self.assertTrue(analysis.allowed)
         self.assertGreaterEqual(analysis.score, config.PRE_TRADE_MIN_SCORE)
 
+    def test_get_kline_window_change_returns_close_to_close_pct(self):
+        class FakeClient:
+            def futures_klines(self, symbol, interval, limit):
+                self.args = (symbol, interval, limit)
+                return _klines_from_closes([100, 99, 98, 97, 96])
+
+        fake = FakeClient()
+        self.trader._client = fake
+
+        change = self.trader.get_kline_window_change("BTC", interval="15m", limit=5)
+
+        self.assertAlmostEqual(change, -4.0)
+        self.assertEqual(fake.args, ("BTCUSDT", "15m", 5))
+
     def test_open_rejects_excluded_stablecoin_even_with_entry_price(self):
         with patch.object(self.trader, "get_current_price", return_value=1.0) as price_mock:
             pos = self.trader.open_position("USDG", margin_usd=100, entry_price=1.0)

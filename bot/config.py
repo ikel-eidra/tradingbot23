@@ -81,8 +81,9 @@ PAPER_SYMBOL_GUARD_MAX_REALIZED_LOSS_USD = float(os.getenv("PAPER_SYMBOL_GUARD_M
 PAPER_SYMBOL_GUARD_EXPIRED_LOSS_USD = float(os.getenv("PAPER_SYMBOL_GUARD_EXPIRED_LOSS_USD", "25"))
 PAPER_SYMBOL_GUARD_BLOCK_LIQUIDATED = os.getenv("PAPER_SYMBOL_GUARD_BLOCK_LIQUIDATED", "true").lower() == "true"
 
-# Skip new entries when BTC's 1h change is below this (negative) value.
-# Avoids buying alts during broad market dumps. Set to None to disable.
+# Skip new long entries when BTC's short-window change is below this decimal
+# threshold. This avoids buying alt dips while the broader tape is dumping.
+# Example: -0.015 = -1.5% over roughly 1 hour. Set to "none" to disable.
 _BTC_FILTER = os.getenv("BTC_REGIME_FILTER_PCT", "-0.015")
 BTC_REGIME_FILTER_PCT = float(_BTC_FILTER) if _BTC_FILTER and _BTC_FILTER.lower() != "none" else None
 

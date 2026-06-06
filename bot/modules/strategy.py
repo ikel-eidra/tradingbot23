@@ -172,6 +172,54 @@ class Strategy:
             logger.warning("%s paper guard skipped: %s", context, blocked)
         return kept
 
+    def _market_regime_entry_decision(self) -> tuple[bool, str, float | None]:
+        """Return whether broad-market conditions allow new long entries."""
+        threshold = config.BTC_REGIME_FILTER_PCT
+        if threshold is None:
+            return True, "BTC regime filter disabled", None
+
+        getter = getattr(self.trader, "get_kline_window_change", None)
+        if getter is None:
+            return True, "BTC regime data unavailable", None
+
+        try:
+            btc_change_pct = getter("BTC", interval="15m", limit=5)
+        except Exception:
+            logger.debug("BTC regime check failed", exc_info=True)
+            return True, "BTC regime check failed; allowing entries", None
+
+        if btc_change_pct is None:
+            return True, "BTC regime data unavailable; allowing entries", None
+
+        threshold_pct = threshold * 100
+        if btc_change_pct <= threshold_pct:
+            reason = (
+                f"BTC 1h regime {btc_change_pct:+.2f}% <= "
+                f"{threshold_pct:+.2f}% threshold"
+            )
+            self.last_pre_trade_decisions.append({
+                "symbol": "BTC",
+                "source": "market_regime",
+                "decision": "WAIT",
+                "score": 0,
+                "reason": reason,
+            })
+            logger.warning("[MARKET-REGIME] Entries blocked | %s", reason)
+            return False, reason, btc_change_pct
+
+        reason = (
+            f"BTC 1h regime {btc_change_pct:+.2f}% > "
+            f"{threshold_pct:+.2f}% threshold"
+        )
+        self.last_pre_trade_decisions.append({
+            "symbol": "BTC",
+            "source": "market_regime",
+            "decision": "RUN",
+            "score": 80,
+            "reason": reason,
+        })
+        return True, reason, btc_change_pct
+
     @staticmethod
     def _analysis_allowed(analysis) -> bool:
         if analysis is None:
@@ -593,6 +641,9 @@ class Strategy:
             "pre_trade_checked": 0,
             "pre_trade_wait": 0,
             "pre_trade_decisions": [],
+            "market_regime_blocked": False,
+            "market_regime_reason": "",
+            "market_regime_change_pct": None,
         }
         self.last_pre_trade_decisions = []
         self._paper_guard_reason_cache = {}
@@ -623,16 +674,23 @@ class Strategy:
         if self._crash_mode:
             logger.warning("[CRASH-MODE] Entries blocked — BTC crash in progress")
         else:
-            # Step 3: Detect dips and open on dip signals
-            dipping = self.detect_dips()
-            summary["dips_found"] = len(dipping)
-            if dipping:
-                opened = self.execute_signals(dipping)
-                summary["positions_opened"] = len(opened)
+            regime_allowed, regime_reason, regime_change = self._market_regime_entry_decision()
+            summary["market_regime_blocked"] = not regime_allowed
+            summary["market_regime_reason"] = regime_reason
+            summary["market_regime_change_pct"] = regime_change
+            if not regime_allowed:
+                logger.warning("[MARKET-REGIME] Monitoring exits only — %s", regime_reason)
+            else:
+                # Step 3: Detect dips and open on dip signals
+                dipping = self.detect_dips()
+                summary["dips_found"] = len(dipping)
+                if dipping:
+                    opened = self.execute_signals(dipping)
+                    summary["positions_opened"] = len(opened)
 
-            # Step 4: Fill any remaining empty slots (always invested)
-            filled = self.fill_empty_slots()
-            summary["slots_filled"] = len(filled)
+                # Step 4: Fill any remaining empty slots (always invested)
+                filled = self.fill_empty_slots()
+                summary["slots_filled"] = len(filled)
 
         summary["pre_trade_decisions"] = list(self.last_pre_trade_decisions)
         summary["pre_trade_checked"] = len(self.last_pre_trade_decisions)
